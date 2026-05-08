@@ -6,6 +6,13 @@ group_deletions <- function(deletion_df){
     
     # if part of the same cell and integration AND
     # if the current mutation position is one greater than the previous
+    # BUG: misplaced parenthesis. The intended check is
+    #   positions_mutated[deletion_num] == positions_mutated[deletion_num - 1] + 1
+    # but the parens make it (positions == positions_prev) + 1, i.e. logical->int yielding
+    # 1 (when equal) or 2 (when not — TRUE? no, FALSE+1=1, TRUE+1=2). Either way the value
+    # is non-zero and `&` treats it as TRUE, so the adjacency check is dead. As written,
+    # any pair of deletions sharing linstring + integration is treated as a contiguous
+    # streak regardless of whether the positions actually neighbour each other.
     if((deletion_df$linstring[deletion_num] == deletion_df$linstring[deletion_num - 1]) &
        (deletion_df$ints_mutated[deletion_num] == deletion_df$ints_mutated[deletion_num - 1]) &
        (deletion_df$positions_mutated[deletion_num] == deletion_df$positions_mutated[deletion_num - 1]) + 1){
@@ -508,6 +515,12 @@ create_one_score_mat <- function(profiles,condense, urid, savename_prefix, mt_or
     
     for(cell in rownames(cellmut_mat_cp1)){
       rec <- recovered_ints[[cell]]
+      # BUG: this checks the entire `recovered_ints` list (which is never NULL at this
+      # point — it's the function argument we just indexed into) instead of the per-cell
+      # lookup `rec`. For cells that aren't keys in `recovered_ints`, `rec` is NULL but
+      # this guard never fires, and the `which(!(int_nums_in_muts %in% rec))` below ends
+      # up flagging EVERY column as missing (since `x %in% NULL` is all FALSE), so those
+      # rows get fully NA-masked rather than partially. Should be `if(is.null(rec))`.
       if(is.null(recovered_ints)){
         rec <- integer(0)
       }

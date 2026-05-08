@@ -106,6 +106,13 @@ change_transition_mat_colnames <- function(flattened_mat){
     mod_colname <- paste0(stripped_colname, cell_type_combos[i])
     colnames(flattened_mat)[uninduced_colnums[i]] <- mod_colname
   }
+  # BUG: this loop renames `induced_colnums` columns but iterates over
+  # `seq_along(uninduced_colnums)`. If the induced and uninduced transition matrices
+  # ever produce a different number of flattened columns (e.g. one matrix is sparser
+  # in the JSON), `induced_colnums[i]` will go out of bounds (NA index) for trailing
+  # columns and the corresponding induced columns silently keep their original
+  # `cell_type_dict.induced_transition_matrix.<n>` names. Should be
+  # `seq_along(induced_colnums)`.
   for(i in seq_along(uninduced_colnums)){
     stripped_colname <- sub('[0-9]+$', '', colnames(flattened_mat)[induced_colnums[i]])
     mod_colname <- paste0(stripped_colname, cell_type_combos[i])

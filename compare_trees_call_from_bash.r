@@ -24,6 +24,13 @@ option_list <- list(
               help = 'savename prefix for tree image and results txt file'),
   make_option(c('-P', '--param_file'), type = 'character', default = NULL,
               help = 'name of paramter json file'),
+  # BUG: the closing `)` for `c(...)` is missing — `type`, `default`, and `help` end up
+  # as named entries inside the c() vector rather than as named arguments to make_option.
+  # As a result, optparse treats `--treefile_dir_path` as a default flag (logical, default
+  # FALSE) and `input_args$treefile_dir_path` is NULL at runtime, causing the
+  # `setwd(input_args$treefile_dir_path)` call below to fail. Should read:
+  #   make_option(c('-T', '--treefile_dir_path'), type = 'character', default = NULL,
+  #               help = 'path to the subdir where the .treefile lives')
   make_option(c('-T', '--treefile_dir_path', type = 'character', default = NULL,
                 help = 'path to the subdir where the .treefile lives'))
   )

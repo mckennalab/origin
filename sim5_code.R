@@ -633,8 +633,13 @@ create_prime_editing_basepos_seqs <- function(target_inds, guide_length, num_uni
   names(ind_to_prime_seq_int_map) <- target_inds
   
   # translate integer representations to nucleotide string representations
-  ind_to_prime_seq_nuc_map <- lapply(ind_to_prime_seq_int_map, 
+  ind_to_prime_seq_nuc_map <- lapply(ind_to_prime_seq_int_map,
                                      function(ints){
+                                       # BUG: the inner lambda ignores `int` and returns the whole `int_to_nuc_list`
+                                       # for every element. sapply then collapses to a 4-row matrix and as.character
+                                       # flattens it to "A","G","C","T","A","G","C","T",... so every prime-editing
+                                       # guide ends up as the same garbage string regardless of `ints`. Should be
+                                       # something like `int_to_nuc_list[[as.character(int)]]`.
                                        nuc_vec <- as.character(sapply(ints, function(int){return(int_to_nuc_list)}))
                                        return(paste(nuc_vec, collapse = ''))
                                      })
@@ -1355,6 +1360,9 @@ for(celltype in cell_type_names){
     # lastly, once target editing windows are finalized, 
     # force sites to be invariant as appropriate for the non-targets
     # note that this will simply be ALL of the mt inds since there are no mt targets
+    # BUG: `input_args$mito_genome_length` is a single number (e.g. 16600), so `length(...)` is 1
+    # and `seq(1, 1)` returns just `c(1)`. Only position 1 of the mt genome is ever eligible to be
+    # marked invariant, regardless of mt_invariant_sites. Should be `seq(1, input_args$mito_genome_length)`.
     mt_invariant_inds <- nontarget_get_invariant_inds(eligible_invariant_sites = seq(1, length(input_args$mito_genome_length)),
                                                       frac_invariant = input_args$cell_type_dict$cell_type_params[[celltype]]$mt_invariant_sites)
     
@@ -1584,6 +1592,9 @@ heteroplasmy_one_site <- function(ind_num,
   num_genomes_with_var <- rbinom(n = 1, size = init_num_mito_genomes, prob = penetrant_frac)
   
   if(num_genomes_with_var == 0){
+    # BUG: `iteger()` is a typo for `integer()` — calling this branch will throw
+    # "could not find function 'iteger'". The function appears to be dead (the actual
+    # heteroplasmy loop below inlines this logic), but the typo is still a latent bug.
     return(list(rows = tibble(i = integer(),
                               j = iteger(),
                               x = integer()),

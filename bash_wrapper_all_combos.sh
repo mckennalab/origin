@@ -2,13 +2,35 @@
  
 base_path=$(pwd)
 
-# initialize param_dir that will be filled
+# initialize param_dir + scDesign3 options
 param_dir=""
+reference_path=""
+celltype_col="cell_type"
+celltype_map=""
+use_pseudotime=""
+sc_ncores=""
+sc_max_cells=""
 
-# if the user provides a path to the param directory with the d flag:
-if [[ "$1" == "-d" ]]; then
-  param_dir="${2:-}"
-fi
+# Arg parsing:
+#   -d <param_dir>           directory of JSON param files (required, prompted if absent)
+#   -r <reference>           path to reference SCE/Seurat .rds or .h5ad for scDesign3
+#   --celltype_col <name>    reference colData column for cell type (default: cell_type)
+#   --celltype_map <json>    optional JSON mapping ct1/ct2/... to reference labels
+#   --use_pseudotime         enable lineage-depth pseudotime as a covariate
+#   --sc_ncores <n>          cores for scDesign3 fit/sim
+#   --sc_max_cells <n>       cap simulated cells per stopping point
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -d) param_dir="${2:-}"; shift 2 ;;
+    -r) reference_path="${2:-}"; shift 2 ;;
+    --celltype_col) celltype_col="${2:-}"; shift 2 ;;
+    --celltype_map) celltype_map="${2:-}"; shift 2 ;;
+    --use_pseudotime) use_pseudotime="--use_pseudotime"; shift 1 ;;
+    --sc_ncores) sc_ncores="${2:-}"; shift 2 ;;
+    --sc_max_cells) sc_max_cells="${2:-}"; shift 2 ;;
+    *) echo "Unknown flag: $1"; exit 1 ;;
+  esac
+done
 
 # if param_dir string is still empty (ie user did not provide param dir at execution)
 if [[ -z "$param_dir" ]]; then
@@ -60,6 +82,12 @@ for filename in "$param_dir"/*; do
     fi
   done
 
+  # BUG: this is not a string comparison. The shell expands `$fastas_present` to the
+  # word `true` or `false`, then runs THAT as a command with `=` and `true` as arguments.
+  # It happens to produce the desired result only because the GNU coreutils `true` and
+  # `false` commands ignore their arguments. Any other value of $fastas_present will be
+  # executed as a shell command. Should be: `if [[ "$fastas_present" == true ]]; then`
+  # (or simply `if $fastas_present; then`).
   if $fastas_present = true; then
     
   
@@ -126,6 +154,10 @@ for filename in "$param_dir"/*; do
   fi
     
 
+  # BUG: same pattern as the `if $fastas_present = true` check above — this runs
+  # `$phylips_present` as a command (with `=` and `true` as args) rather than comparing
+  # strings. Works only because `true`/`false` are commands that ignore their arguments.
+  # Should be: `if [[ "$phylips_present" == true ]]; then`.
   if $phylips_present = true; then
 
     echo "pwd here == $(pwd)"
@@ -196,6 +228,21 @@ for filename in "$param_dir"/*; do
   Rscript process_results_from_bash.r -I "$most_recent_runid" 
 
   Rscript convert_scoremats_to_csvs.r --urid "$most_recent_runid" --score_mat_path "${base_path}/output/score_mats/${most_recent_runid}/matrices/"
+
+  # Generate single-cell expression profiles for internal + terminal cells via
+  # scDesign3, using the reference scRNA-seq dataset given by -r. Skipped if the
+  # caller did not supply -r.
+  if [[ -n "$reference_path" ]]; then
+    echo "Generating single-cell profiles via scDesign3 (run id $most_recent_runid)..."
+    sc_args=(-I "$most_recent_runid" -R "$reference_path" --celltype_col "$celltype_col")
+    [[ -n "$celltype_map"   ]] && sc_args+=(--celltype_map "$celltype_map")
+    [[ -n "$use_pseudotime" ]] && sc_args+=("$use_pseudotime")
+    [[ -n "$sc_ncores"      ]] && sc_args+=(--ncores "$sc_ncores")
+    [[ -n "$sc_max_cells"   ]] && sc_args+=(--max_cells_per_timepoint "$sc_max_cells")
+    Rscript "${base_path}/generate_sc_profiles_from_bash.r" "${sc_args[@]}"
+  else
+    echo "No -r reference provided; skipping scDesign3 single-cell profile generation."
+  fi
 
   echo "Total sim param file took $SECONDS seconds"
 
