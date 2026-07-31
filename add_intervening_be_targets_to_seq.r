@@ -17,159 +17,58 @@ generate_non_be_target_sequence <- function(barcode_length, nuc_fracs, target_fr
   #' @param be_target_count integer. The number of base editing targets in the barcode
   #' @note Specified targets and their respective counts take priority over nucleotide ratios
   
-  # if there are no BE targets, we can randomly generate the entire barcode sequence
-  # # note that this assumes there is no base-specific nuclease target
-  if(be_target_count == 0){
-    return(sample(c('A', 'G', 'C', 'T'), size = barcode_length, replace = TRUE))
-  }
-  
-  # find number of nucleotides in the barcode that are NOT BE targets
-  num_non_be_targets <- barcode_length - be_target_count
-  
-  # find number of remaining As, Gs, Cs, and Ts:
-  # given the required nucleotide fractions, find the number of required nucleotides of each base in barcode
-  num_required_as <- round(barcode_length * nuc_fracs[1])
-  num_required_gs <- round(barcode_length * nuc_fracs[2])
-  num_required_cs <- round(barcode_length * nuc_fracs[3])
-  num_required_ts <- round(barcode_length * nuc_fracs[4])
-  
-  # the following process deals with reconciling any differences that may arise between 
-  # the provided fraction of each nucleotide and the number of BE targets
-  
-  # initialize our leftover_bases tracker to 0; will stay at zero if the specified number of 
-  # BE targets does not exceed the fraction of the barcode that should be that base
-  leftover_bases <- 0
-  
-  # subtract out the number of specified BE targets from the originally-inferred number of occurrences of the BE target base
-  # repeat this process for each of the four possible BE targets
-  if(target_from == 'A'){
-    
-    num_required_as <- num_required_as - be_target_count
-    # if there are more BE targets of a specific nuc than allotted, we'll have to take away from other bases' counts
-    if(num_required_as < 0){ 
-      leftover_bases <- abs(num_required_as)
-      num_required_as <- 0
-    }
-  } else if(target_from == 'G'){
-    num_required_gs <- num_required_gs - be_target_count
-    if(num_required_gs < 0){ 
-      leftover_bases <- abs(num_required_gs)
-      num_required_gs <- 0
-    }
-  } else if(target_from == 'C'){
-    num_required_cs <- num_required_cs - be_target_count
-    if(num_required_cs < 0){ 
-      leftover_bases <- abs(num_required_cs)
-      num_required_cs <- 0
-    }
-    
-  } else if(target_from == 'T'){
-    num_required_ts <- num_required_ts - be_target_count
-    if(num_required_ts < 0){ 
-      leftover_bases <- abs(num_required_ts)
-      num_required_ts <- 0
-    }
-  }
-  
-  # generate a vector of bases that are NOT BE targets
   all_bases <- c('A', 'G', 'C', 'T')
-  non_target_bases <- setdiff(all_bases, target_from)
-  
-  # regardless of whether the user provided an incompatible nucleotide ratio given the inputted targets,
-  # we have to calculate the relative nucleotide fractions of the NON-TARGET bases
-  non_target_probs <- c(num_required_as, num_required_gs, 
-                        num_required_cs, num_required_ts) / (barcode_length - be_target_count + leftover_bases)
-  
-  if(leftover_bases > 0){
-    
-    # if the user provided incompatible nucleotide fractions and targets, we have to correct them here: 
-    
-    # disperse some extra num_bases bases across poss_bases according to probabilities poss_bases_probs
-    adjust_nuc_counts <- function(poss_bases, poss_bases_probs, num_bases, subtract_counts = FALSE){
-      # poss_bases is the eligible bases that 
-      selected_bases <- sample(poss_bases, size = num_bases, replace = TRUE, prob = poss_bases_probs)
-      adjust_table <- table(selected_bases)
-      
-      # if we are ultimately going to subtract these counts, convert to negative
-      # will simplify the addition process later
-      if(subtract_counts){
-        adjust_table <- adjust_table * -1
-      }
-      return(adjust_table)
-    }
-    
-    # get base-specific count adjustments to account for disparity between allocated target bases and nucleotide fractions
-    take_away_from_table <- adjust_nuc_counts(poss_bases = non_target_bases,
-                                              poss_bases_probs = non_target_probs[which(all_bases != target_from)],
-                                              num_bases = leftover_bases,
-                                              subtract_counts = TRUE)
-    
-    # default value for any AGCT not in counts is 0
-    for(nuc in all_bases){
-      if(!(nuc %in% names(take_away_from_table))){
-        take_away_from_table[[nuc]] <- 0
-      }
-    }
-    
-    # given the dispersion of extra base counts across non-target bases, adjust num_required nucleotides in bc sequence
-    num_required_as <- num_required_as + take_away_from_table[['A']]
-    num_required_gs <- num_required_gs + take_away_from_table[['G']]
-    num_required_cs <- num_required_cs + take_away_from_table[['C']]
-    num_required_ts <- num_required_ts + take_away_from_table[['T']]
+
+  if(length(barcode_length) != 1 || is.na(barcode_length) ||
+     barcode_length < 0 || barcode_length %% 1 != 0){
+    stop('barcode_length must be one non-negative integer.')
   }
-  
-  # after adjusting for errors due to incompatible target/nucleotide-ratio, adjust for rounding error:
-  # required_base_total is the number of bases that haven't been assigned as targets yet
-  required_base_total <- num_required_as + num_required_cs + num_required_gs + num_required_ts 
-  
-  if(required_base_total != num_non_be_targets){
-    # if there is rounding error causing base counts to not equal total barcode length:
-    if(required_base_total > num_non_be_targets){
-      # captures the case when we have too many bases to add based on calculations
-      # i.e. have to remove rounding error-induced extra base(s) from non-target
-      diff <- required_base_total - num_non_be_targets
-      rounding_change <- adjust_nuc_counts(poss_bases = all_bases,
-                                           poss_bases_probs = non_target_probs,
-                                           num_bases = diff,
-                                           subtract_counts = TRUE)
-      
-    }
-    else if(num_non_be_targets > required_base_total){
-      # captures the case when we have not enough bases to add based on calculations
-      diff <- num_non_be_targets - required_base_total
-      # i.e. have to add bases. unlike before, we permit changing target base count here
-      rounding_change <- adjust_nuc_counts(poss_bases = all_bases,
-                                           poss_bases_probs = non_target_probs,
-                                           num_bases = diff,
-                                           subtract_counts = FALSE)
-    }
-    
-    
-    # default value for any AGCT not in counts is 0
-    for(nuc in all_bases){
-      if(!(nuc %in% names(rounding_change))){
-        rounding_change[[nuc]] <- 0
-      }
-    }
-    num_required_as <- num_required_as - rounding_change[['A']]
-    num_required_gs <- num_required_gs - rounding_change[['G']]
-    num_required_cs <- num_required_cs - rounding_change[['C']]
-    num_required_ts <- num_required_ts - rounding_change[['T']]
-    
+  if(length(be_target_count) != 1 || is.na(be_target_count) ||
+     be_target_count < 0 || be_target_count %% 1 != 0 ||
+     be_target_count > barcode_length){
+    stop('be_target_count must be an integer between zero and barcode_length.')
   }
-  
-  # create a growing vector of the appropriate number of As, Gs, Cs, and Ts
-  # this length should be equal to the number of non_be_targets
-  # then shuffle it
-  non_target_sequence <- c(rep('A', num_required_as),
-                           rep('G', num_required_gs),
-                           rep('C', num_required_cs),
-                           rep('T', num_required_ts))
-  
-  # shuffle this sequence
-  non_target_sequence <- sample(non_target_sequence, size = length(non_target_sequence), replace = FALSE)
-  
-  return(non_target_sequence)
+  if(length(nuc_fracs) != 4 || any(!is.finite(nuc_fracs)) ||
+     any(nuc_fracs < 0) || sum(nuc_fracs) <= 0){
+    stop('nuc_fracs must contain four non-negative A/G/C/T weights with a positive sum.')
+  }
+  if(length(target_from) != 1 || !(target_from %in% all_bases)){
+    stop("target_from must be one of 'A', 'G', 'C', or 'T'.")
+  }
+
+  # Convert fractional composition into integer counts with the largest-remainder
+  # method so the counts always sum exactly to barcode_length.
+  normalized_fracs <- nuc_fracs / sum(nuc_fracs)
+  raw_counts <- barcode_length * normalized_fracs
+  base_counts <- floor(raw_counts)
+  names(base_counts) <- all_bases
+  remainder <- barcode_length - sum(base_counts)
+  if(remainder > 0){
+    add_to <- order(raw_counts - base_counts, decreasing = TRUE)[seq_len(remainder)]
+    base_counts[add_to] <- base_counts[add_to] + 1
+  }
+
+  # Target sites take priority over the requested composition. If the rounded
+  # composition contains too few target bases, transfer counts from the most
+  # abundant non-target bases without allowing negative counts.
+  target_index <- match(target_from, all_bases)
+  target_deficit <- max(be_target_count - base_counts[target_index], 0)
+  if(target_deficit > 0){
+    for(unused in seq_len(target_deficit)){
+      donor_counts <- base_counts
+      donor_counts[target_index] <- -Inf
+      donor_index <- which.max(donor_counts)
+      if(base_counts[donor_index] <= 0){
+        stop('Unable to reconcile target count with nucleotide composition.')
+      }
+      base_counts[donor_index] <- base_counts[donor_index] - 1
+      base_counts[target_index] <- base_counts[target_index] + 1
+    }
+  }
+
+  base_counts[target_index] <- base_counts[target_index] - be_target_count
+  non_target_sequence <- rep(all_bases, times = base_counts)
+  sample(non_target_sequence, size = length(non_target_sequence), replace = FALSE)
 }
 
 
@@ -177,8 +76,23 @@ generate_non_be_target_sequence <- function(barcode_length, nuc_fracs, target_fr
 # according to their specified configs
 generate_target_indices <- function(config, num_targets, target_pos_1, bc_length_with_targets, num_bases_btwn = NULL){
   # if config is Uniform, we want uniformly-spaced target indices
-  
-  
+
+  config <- toupper(config)
+  if(length(num_targets) != 1 || is.na(num_targets) || num_targets < 0 ||
+     num_targets %% 1 != 0){
+    stop('num_targets must be one non-negative integer.')
+  }
+  if(length(bc_length_with_targets) != 1 || is.na(bc_length_with_targets) ||
+     bc_length_with_targets < 0 || bc_length_with_targets %% 1 != 0){
+    stop('bc_length_with_targets must be one non-negative integer.')
+  }
+  if(num_targets > bc_length_with_targets){
+    stop('num_targets cannot exceed bc_length_with_targets.')
+  }
+  if(num_targets == 0){
+    return(integer(0))
+  }
+
   if(config == 'U'){
     
     # maximize the space between successive BE targets, beginning at the first base of the barcode
@@ -191,14 +105,22 @@ generate_target_indices <- function(config, num_targets, target_pos_1, bc_length
   } else if(config == 'S'){
     # if config is Spaced, we have a position of the first BE target as well as an increment
     # such that each subsequent target is increment bases after the first BE target
+    if(length(target_pos_1) != 1 || is.na(target_pos_1) ||
+       target_pos_1 < 1 || target_pos_1 %% 1 != 0 ||
+       length(num_bases_btwn) != 1 || is.na(num_bases_btwn) ||
+       num_bases_btwn < 0 || num_bases_btwn %% 1 != 0){
+      stop('Spaced targets require a positive integer first position and a non-negative integer gap.')
+    }
     final_target_pos <- target_pos_1 + (num_bases_btwn + 1)*(num_targets - 1)
     if(final_target_pos > bc_length_with_targets){
-      print('Incompatible barcode target configuration. Check details of S configuration.')
+      stop('Incompatible barcode target configuration: final target exceeds barcode length.')
     }
     
     
     all_inds <- unique(sapply(seq(from = target_pos_1, to = final_target_pos, 
                                   by = (num_bases_btwn+1)), round))
+  } else{
+    stop("config must be one of 'U' (uniform), 'R' (random), or 'S' (spaced).")
   }
   
   return(all_inds)
@@ -239,7 +161,7 @@ add_intervening_be_targets <- function(target_pos_config, target_from, be_target
 
   
   # fill in the remaining non-target positions with the existing sequence
-  non_target_inds <- setdiff(seq(1, length(seq_with_targets)), all_inds)
+  non_target_inds <- setdiff(seq_along(seq_with_targets), all_inds)
   seq_with_targets[non_target_inds] <- non_target_sequence
   
   
@@ -257,4 +179,3 @@ add_intervening_be_targets <- function(target_pos_config, target_from, be_target
   
   
 }
-

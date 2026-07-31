@@ -24,29 +24,39 @@ option_list <- list(
               help = 'savename prefix for tree image and results txt file'),
   make_option(c('-P', '--param_file'), type = 'character', default = NULL,
               help = 'name of paramter json file'),
-  # BUG: the closing `)` for `c(...)` is missing — `type`, `default`, and `help` end up
-  # as named entries inside the c() vector rather than as named arguments to make_option.
-  # As a result, optparse treats `--treefile_dir_path` as a default flag (logical, default
-  # FALSE) and `input_args$treefile_dir_path` is NULL at runtime, causing the
-  # `setwd(input_args$treefile_dir_path)` call below to fail. Should read:
-  #   make_option(c('-T', '--treefile_dir_path'), type = 'character', default = NULL,
-  #               help = 'path to the subdir where the .treefile lives')
-  make_option(c('-T', '--treefile_dir_path', type = 'character', default = NULL,
-                help = 'path to the subdir where the .treefile lives'))
+  make_option(c('-T', '--treefile_dir_path'), type = 'character', default = NULL,
+              help = 'path to the subdir where the .treefile lives')
   )
 
 opt_parser <- OptionParser(option_list = option_list, add_help_option = FALSE)
 input_args <- parse_args(opt_parser)
 
+if(is.null(input_args$treefile_dir_path) || is.null(input_args$recon_tree_path) ||
+   is.null(input_args$run_id) || is.null(input_args$savename_prefix)){
+  stop('--treefile_dir_path, --recon_tree_path, --run_id, and --savename_prefix are required.')
+}
+
+treefile_dir_path <- normalizePath(input_args$treefile_dir_path, mustWork = TRUE)
+if(!grepl('^/', input_args$recon_tree_path)){
+  input_args$recon_tree_path <- file.path(treefile_dir_path, input_args$recon_tree_path)
+}
+input_args$recon_tree_path <- normalizePath(input_args$recon_tree_path, mustWork = TRUE)
+if(!input_args$ground_truth_tree_path == ''){
+  input_args$ground_truth_tree_path <- normalizePath(
+    input_args$ground_truth_tree_path,
+    mustWork = TRUE
+  )
+}
 
 # if there is not a ground truth tree path provided, we need to find the corresponding ground truth tree
 # for the provided recon tree path. to find the correct tree, we need the timepoint
 # and the cell sampling fraction. we can get this info from the fasta file path that was used to build the tree
 
-setwd(input_args$treefile_dir_path)
+setwd(treefile_dir_path)
 
 if(!input_args$ground_truth_tree_path == ''){ # if a ground truth tree path is provided, can just read that
-  ground_truth_tree <- read.tree(input_args$ground_truth_tree_path)
+  full_gt_path <- input_args$ground_truth_tree_path
+  ground_truth_tree <- read.tree(full_gt_path)
 } else{ # manually match to groundt truth tree at this timepoint
   
   timept <- str_extract(input_args$recon_tree_path, '(?<=time_)\\d+(\\.\\d+)?')
@@ -56,9 +66,12 @@ if(!input_args$ground_truth_tree_path == ''){ # if a ground truth tree path is p
   matching_gt_tree_path <- ground_truth_trees[grep(pattern = timept_pattern, x = ground_truth_trees)]
   full_gt_path <- file.path(output_dir_stem, 'processed_newicks', input_args$run_id, matching_gt_tree_path)
   
-  if(length(matching_gt_tree_path) < 1){
-    print('Error loading ground truth tree')
-    quit(save = 'no', status = 0)    
+  if(length(matching_gt_tree_path) != 1){
+    stop(sprintf(
+      'Expected one ground-truth tree for timepoint %s; found %d.',
+      timept,
+      length(matching_gt_tree_path)
+    ))
   }
   
   ground_truth_tree <- read.tree(full_gt_path)
@@ -72,6 +85,13 @@ cell_pop_paths <- list.files(file.path(output_dir_stem, 'cell_populations', inpu
 
 timept_pattern <- paste0('.*time_', timept, '.*\\.rds')
 matching_cell_pop_path <- cell_pop_paths[grep(pattern = timept_pattern, x = cell_pop_paths)]
+if(length(matching_cell_pop_path) != 1){
+  stop(sprintf(
+    'Expected one cell-population file for timepoint %s; found %d.',
+    timept,
+    length(matching_cell_pop_path)
+  ))
+}
 full_cell_pop_path <- file.path(output_dir_stem, 'cell_populations', input_args$run_id, matching_cell_pop_path)
 
 
@@ -116,7 +136,12 @@ plot_tree_with_color <- function(path_to_tree,
     type_color_map_list <- color_map_list
   } else{
     cell_type_names <- unique(sapply(pop, function(cell) cell$celltype))
-    cell_type_colors <- brewer.pal(length(cell_type_names), 'Set2')
+    if(length(cell_type_names) <= 8){
+      palette_size <- max(3, length(cell_type_names))
+      cell_type_colors <- brewer.pal(palette_size, 'Set2')[seq_along(cell_type_names)]
+    } else{
+      cell_type_colors <- colorRampPalette(brewer.pal(8, 'Set2'))(length(cell_type_names))
+    }
     
     type_color_map_list <- setNames(cell_type_colors, cell_type_names)
     type_color_map_list <- type_color_map_list[!is.na(names(type_color_map_list))]
@@ -131,7 +156,7 @@ plot_tree_with_color <- function(path_to_tree,
     if(celltype %in% names(type_color_map_list)){
       return(type_color_map_list[[celltype]])
     } else{
-      return(NULL)
+      return('grey70')
     }
   })
 
@@ -166,6 +191,14 @@ recon_tree <- read.tree(input_args$recon_tree_path)
 
 # subset ground truth tree to only include those tip labels present in recon tree:
 recon_tips <- recon_tree$tip.label
+missing_recon_tips <- setdiff(recon_tips, ground_truth_tree$tip.label)
+if(length(missing_recon_tips) > 0){
+  stop(sprintf(
+    'Reconstructed tree contains %d tips absent from the ground-truth tree: %s',
+    length(missing_recon_tips),
+    paste(head(missing_recon_tips, 10), collapse = ', ')
+  ))
+}
 subset_gt_tree <- drop.tip(ground_truth_tree, setdiff(ground_truth_tree$tip.label, recon_tips))
 
 rf_dist <-  phangorn::RF.dist(recon_tree, subset_gt_tree, normalize = TRUE)
@@ -195,4 +228,3 @@ close(file(res_file_path, open = 'w'))
 
 cat(paste0(rf_dist, '\n'), file = res_file_path, append = TRUE)
 cat(paste0(input_args$param_file, '\n'), file = res_file_path, append = TRUE)
-

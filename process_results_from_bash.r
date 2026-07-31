@@ -29,27 +29,24 @@ extract_subrun_details <- function(file_name, bc_or_mt, mat_colnames, recon_meth
   # integration recovery prob immediately follows _recprob_
   int_recprob <- as.numeric(str_extract(string = file_name, pattern = '(?<=_RP_).+(?=_samp)'))
   
-  # cell type-specific names and sampling rates are found immediately following _samp_
-  growing_cell_type_names <- character()
-  growing_cell_type_samps <- numeric()
-  
-  # iteratively find next cell type name by using the previous as a search pattern
-  cell_type_pattern <- '(?<=_samp_).+?(?=-)'
-  while(TRUE){
-    
-    # extract this cell type's name
-    this_cell_type_name <- str_extract(string = file_name, pattern = cell_type_pattern)
-    if(is.na(this_cell_type_name)){
-      break
-    }
-    
-    # extract this cell type's sampling fraction
-    this_cell_type_samp <- as.numeric(str_extract(string = file_name, pattern = '(?<=-)\\d+(\\.\\d+)?'))
-    
-    growing_cell_type_names <- append(growing_cell_type_names, this_cell_type_name)
-    growing_cell_type_samps <- append(growing_cell_type_samps, this_cell_type_samp)
-    
-    cell_type_pattern <- paste0('(?<=', this_cell_type_name, '-', this_cell_type_samp, '_).+?(?=-)')
+  # Cell-type/sample-rate pairs form the contiguous name-number block after
+  # "_samp_". Parse the block in one pass so each type receives its own rate.
+  sampling_suffix <- str_extract(file_name, '(?<=_samp_).*')
+  sampling_block <- str_match(
+    sampling_suffix,
+    '^((?:[^_]+-[0-9.]+)(?:_[^_]+-[0-9.]+)*)'
+  )[, 2]
+  sampling_matches <- str_match_all(
+    ifelse(is.na(sampling_block), '', sampling_block),
+    '(?:^|_)([^_]+)-([0-9.]+)'
+  )[[1]]
+
+  if(nrow(sampling_matches) == 0){
+    growing_cell_type_names <- character()
+    growing_cell_type_samps <- numeric()
+  } else{
+    growing_cell_type_names <- sampling_matches[, 2]
+    growing_cell_type_samps <- as.numeric(sampling_matches[, 3])
   }
   
   cell_rec_fracs <- paste(growing_cell_type_names, growing_cell_type_samps, sep = ': ')
@@ -100,20 +97,26 @@ change_transition_mat_colnames <- function(flattened_mat){
   
   # correct row-by-row order is preserved using the t()
   cell_type_combos <- as.character(t(outer(cell_types, cell_types, paste0)))
+
+  if(length(uninduced_colnums) != length(cell_type_combos) ||
+     length(induced_colnums) != length(cell_type_combos)){
+    stop(sprintf(
+      paste(
+        'Transition-matrix columns do not match the %d expected source/target',
+        'cell-type combinations (uninduced=%d, induced=%d).'
+      ),
+      length(cell_type_combos),
+      length(uninduced_colnums),
+      length(induced_colnums)
+    ))
+  }
   
   for(i in seq_along(uninduced_colnums)){
     stripped_colname <- sub('[0-9]+$', '', colnames(flattened_mat)[uninduced_colnums[i]])
     mod_colname <- paste0(stripped_colname, cell_type_combos[i])
     colnames(flattened_mat)[uninduced_colnums[i]] <- mod_colname
   }
-  # BUG: this loop renames `induced_colnums` columns but iterates over
-  # `seq_along(uninduced_colnums)`. If the induced and uninduced transition matrices
-  # ever produce a different number of flattened columns (e.g. one matrix is sparser
-  # in the JSON), `induced_colnums[i]` will go out of bounds (NA index) for trailing
-  # columns and the corresponding induced columns silently keep their original
-  # `cell_type_dict.induced_transition_matrix.<n>` names. Should be
-  # `seq_along(induced_colnums)`.
-  for(i in seq_along(uninduced_colnums)){
+  for(i in seq_along(induced_colnums)){
     stripped_colname <- sub('[0-9]+$', '', colnames(flattened_mat)[induced_colnums[i]])
     mod_colname <- paste0(stripped_colname, cell_type_combos[i])
     colnames(flattened_mat)[induced_colnums[i]] <- mod_colname
@@ -179,6 +182,8 @@ make_results_df <- function(urid){
     
     path_to_file <- file.path(output_dir_stem, 'rf_dist_files', urid, file_name)
   
+    subrun_details <- NULL
+
     if((startsWith(x = file_name, prefix = 'fasta_proc')) |
        (startsWith(x = file_name, prefix = 'score_proc'))){
       bc_or_mt <- str_extract(string = file_name,
@@ -212,8 +217,11 @@ make_results_df <- function(urid){
       
       # merge/stack these mt and bc subrun details into a single vector
       subrun_details <- ifelse(!is.na(mt_subrun_details), mt_subrun_details, bc_subrun_details)
-      
-      
+    }
+
+    if(is.null(subrun_details)){
+      warning(sprintf('Skipping unrecognized RF result filename: %s', file_name))
+      next
     }
     
     
@@ -244,6 +252,10 @@ make_results_df <- function(urid){
     
     
   }
+
+  if(length(subrun_details_list) == 0){
+    stop(sprintf('No recognized RF result files found for run %s.', urid))
+  }
   
   subrun_details_mat <- do.call(rbind, subrun_details_list)
   subrun_details_df <- as.data.frame(subrun_details_mat, row.names = NULL)
@@ -254,7 +266,8 @@ make_results_df <- function(urid){
   write.csv(subrun_details_df, full_output_path, row.names = FALSE)
   
   print(paste0('wrote results to ', full_output_path))
-  
+
+  return(subrun_details_df)
 }
   
 
@@ -277,4 +290,3 @@ make_heatmap <- function(run_id){
   
   ggsave(file.path(output_dir_stem, 'param_results_files', run_id, 'rf_heatmap.png'))
 }
-

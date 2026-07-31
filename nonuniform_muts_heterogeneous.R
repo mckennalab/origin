@@ -19,20 +19,18 @@ filter_elig_ints_by_edit_window <- function(pos_to_window_inds_list,
     
     growing_elig_ints <- lapply(all_pos_in_window, function(pos){
       if(as.character(pos) %in% names(pos_to_unedited_int_list)){
-        
         return(pos_to_unedited_int_list[[as.character(pos)]])
       } else{
-        
-        return(c())
+        return(NULL)
       }
     })
     
-    non_null <- growing_elig_ints[!sapply(growing_elig_ints, function(x){
-      return((is.null(x)) || length(x) == 0)
-    })]
+    non_null <- growing_elig_ints[!vapply(growing_elig_ints, is.null, logical(1))]
     if(length(non_null) == 0){
       return(integer(0))
     }
+    # Keep empty vectors in the intersection. An empty eligible set at any
+    # edited position closes the entire window, as required by the contract.
     return(Reduce(intersect, non_null))
   })
   
@@ -42,6 +40,7 @@ filter_elig_ints_by_edit_window <- function(pos_to_window_inds_list,
     })
     return(as.integer(unique(unlist(new_poss_eligs))))
   })
+  return(updated_elig_ints)
 }
  
 # returns c(i_coords, j_coords) which can be used to build new mutation matrix
@@ -51,7 +50,8 @@ non_uniform_editing <- function(pos_er_list, num_integrations, eligible_ints, ti
   
   
 
-  pos_int_list <- sapply(names(pos_er_list), function(x){ # sapply through target base positions
+  target_positions <- names(pos_er_list)
+  pos_int_list <- setNames(lapply(target_positions, function(x){ # iterate through target base positions
     char_x <- as.character(x)
     
    
@@ -70,7 +70,7 @@ non_uniform_editing <- function(pos_er_list, num_integrations, eligible_ints, ti
       num_ints_edited <- rbinom(n = 1, size = length(eligible_ints[[char_x]]), prob = min(c(er, 1)))
       
       
-      # we still sample from a uniform distribution (replace = TRUE), but we later remove duplicate (i,j) positions if they arise
+      # Draw a binomial count, then choose that many distinct eligible integrations.
       if(num_ints_edited > 0){
         
         # because R is very dumb and cannot sample() an element from a length 1 integer vector, need to take an extra step if there's only one eligible integration to edit
@@ -87,8 +87,11 @@ non_uniform_editing <- function(pos_er_list, num_integrations, eligible_ints, ti
           
         } else{
           
-          # FALSE should remove need for unique, but keeping TRUE to be more faithful to edit rate
-          which_ints_edited <- sample(x = eligible_ints[[char_x]], size = num_ints_edited, replace = TRUE)
+          which_ints_edited <- sample(
+            x = eligible_ints[[char_x]],
+            size = num_ints_edited,
+            replace = FALSE
+          )
           
           return(which_ints_edited)
           
@@ -109,13 +112,15 @@ non_uniform_editing <- function(pos_er_list, num_integrations, eligible_ints, ti
       
     }
     
-  })
+  }), target_positions)
    
   # which integrations were edited for respective base positions, correspond to row values in mutation matrix
   temp_i_coords <- unname(unlist(pos_int_list))
 
-  temp_j_coords <- as.integer(unname(unlist(sapply(names(pos_int_list),
-                                                   function(x){return(rep(x, length(pos_int_list[[as.character(x)]])))}))))
+  temp_j_coords <- rep(
+    as.integer(names(pos_int_list)),
+    lengths(pos_int_list)
+  )
   
   
   # remove duplicates
@@ -186,11 +191,25 @@ get_background_edit_inds <- function(num_rows, num_cols, bg_pos_er_list, mut_typ
     bg_pos_er_list <- as.list(selected_probs)
   }   
   
-  # find the average background edit rate across all sites (targets & non-targets)
-  avg_er <- mean(unname(unlist(bg_pos_er_list)))
-  
+  position_edit_probs <- as.numeric(unlist(bg_pos_er_list, use.names = FALSE))
+  if(length(position_edit_probs) != num_cols){
+    stop('bg_pos_er_list must contain one edit probability per matrix column.')
+  }
+  if(any(!is.finite(position_edit_probs)) ||
+     any(position_edit_probs < 0 | position_edit_probs > 1)){
+    stop('Background edit probabilities must be finite values between zero and one.')
+  }
 
-  num_edits <- rbinom(n = 1, size = num_rows*num_cols, prob = avg_er)
+  # Drawing a binomial count independently for each position is equivalent to
+  # one Bernoulli draw per matrix coordinate. Sampling rows without replacement
+  # then realizes that count without creating duplicate coordinates.
+  edits_per_position <- rbinom(
+    n = num_cols,
+    size = num_rows,
+    prob = position_edit_probs
+  )
+  edited_positions <- which(edits_per_position > 0)
+  num_edits <- sum(edits_per_position)
   if(verbose){
     cat(paste0('\nnum_edits for ', mut_type, ' == ', num_edits, '\n'), 
         file = file.path('output', 'run_logs', unique_run_id, paste0('runlog_', unique_run_id, '.txt')), 
@@ -203,20 +222,13 @@ get_background_edit_inds <- function(num_rows, num_cols, bg_pos_er_list, mut_typ
     
   }
 
-  # selection of integrations is still random, but ...
-  temp_i_coords <- sample(seq(1, num_rows), size = num_edits, replace = TRUE)
-  # ... sample the positions according to weights specified by background edit rates
-  
-  temp_j_coords <- sample(seq(1, num_cols), size = num_edits, replace = TRUE, 
-                          # prob = unlist(unname(bg_pos_er_list)))
-                          prob = as.numeric(bg_pos_er_list))
- 
-  # prevents two mutations from having the same i,j coordinates
-  coords <- unique(mapply(list, temp_i_coords, temp_j_coords, SIMPLIFY=F))
-  
-  # unpack the unique coordinates into i and j vectors
-  i_coords <- sapply(coords, function(x){return(x[[1]])})
-  j_coords <- sapply(coords, function(x){return(x[[2]])})
+  i_coords <- unlist(
+    lapply(edits_per_position[edited_positions], function(position_count){
+      sample.int(num_rows, size = position_count, replace = FALSE)
+    }),
+    use.names = FALSE
+  )
+  j_coords <- rep(edited_positions, edits_per_position[edited_positions])
   
 
   return_list <- list('num_edits' = num_edits, 'i_coords' = i_coords, 'j_coords' = j_coords)
@@ -422,6 +434,7 @@ transition_func <- function(mut_mat, num_rows, num_cols, baseline_ints,
 
 transversion_func <- function(mut_mat, num_rows, num_cols, bg_transversion_pos_er_list, baseline_ints, bg_sub_prob_mat,
                               target_transversion_pos_er_list = NULL, force_target_transversions = FALSE, verbose = FALSE,
+                              target_transversion_to_base = NULL,
                               target_to_window_ind_list = NULL, 
                               window_to_target_ind_list = NULL, 
                               close_window = FALSE){
@@ -478,7 +491,7 @@ transversion_func <- function(mut_mat, num_rows, num_cols, bg_transversion_pos_e
         }
         
         # get the two options that the base can undergo a transversion into
-        transversion_options <- transversion_matches[base_to_mutate]
+        transversion_options <- transversion_matches[[base_to_mutate]]
         
         # sample from these two bases according to bg substitution probs
         newbase <- sample(transversion_options, size = 1, prob = bg_sub_prob_mat[base_to_mutate, transversion_options])
@@ -574,11 +587,27 @@ transversion_func <- function(mut_mat, num_rows, num_cols, bg_transversion_pos_e
   
   
   if(nu_transversion_i_coords[1] != FALSE){
-    
+    target_bases_going_to <- vapply(seq_len(num_cols), function(pos){
+      from_base <- as.integer(baseline_ints[pos])
+      if(force_target_transversions){
+        if(!is.null(target_transversion_to_base)){
+          return(as.integer(target_transversion_to_base))
+        }
+        return(as.integer(forced_transversion_matches[[from_base]]))
+      }
+      options <- transversion_matches[[from_base]]
+      probs <- bg_sub_prob_mat[from_base, options]
+      if(sum(probs) <= 0){
+        return(as.integer(options[1]))
+      }
+      as.integer(sample(options, size = 1, prob = probs))
+    }, integer(1))
+
     # we allow the user to force transversions in the non-uniform editing but not the uniform
     mut_mat <- post_indices_transversion_func(i_coords = nu_transversion_i_coords,
                                               j_coords = nu_transversion_j_coords,
                                               incoming_mat = mut_mat,
+                                              bases_going_to = target_bases_going_to,
                                               force_transversions = force_target_transversions)
   }
   
@@ -831,7 +860,7 @@ perform_deletion <- function(ival, jval, del_length, mat_name, num_cols){
 
 all_deletions_one_mat <- function(i, j, d, old_mat, num_cols){
   
-  for(elem_num in 1:length(i)){
+  for(elem_num in seq_along(i)){
     old_mat <- perform_deletion(i[elem_num], j[elem_num], d[elem_num], old_mat, num_cols)
   }
   
@@ -1080,6 +1109,8 @@ perform_all_bc_mutations <- function(incoming_mut_mat,
                                      interdel_dropout_prob,
                                      prime_editing_system,
                                      ind_to_prime_seq_int_map,
+                                     force_target_transversions,
+                                     target_transversion_to_base,
                                      close_nuc_window_after_edit,
                                      close_transition_window_after_edit,
                                      close_transversion_window_after_edit,
@@ -1108,6 +1139,8 @@ perform_all_bc_mutations <- function(incoming_mut_mat,
                                         bg_transversion_pos_er_list = bg_transversion_list, 
                                         target_transversion_pos_er_list = target_transversion_list,
                                         bg_sub_prob_mat = prob_sub_mat,
+                                        force_target_transversions = force_target_transversions,
+                                        target_transversion_to_base = target_transversion_to_base,
                                         target_to_window_ind_list = be_target_to_window_ind_list, 
                                         window_to_target_ind_list = be_window_to_target_ind_list, 
                                         close_window = close_transversion_window_after_edit)
@@ -1142,6 +1175,3 @@ perform_all_bc_mutations <- function(incoming_mut_mat,
   return(incoming_mut_mat)
   
 }
-
-
-

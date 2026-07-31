@@ -1,9 +1,15 @@
-# remote_mito_clean — Documentation
+# remote_mito_clean
 
-This document describes the repository as it currently exists on the
-`heterogeneous` branch. It is generated from a read of the source files; the
-shorter, hand-written `README.md` is the canonical user-facing entry point and
-is unchanged.
+This document describes the repository’s simulation and analysis workflow.
+See [`FUNCTION_REFERENCE.md`](FUNCTION_REFERENCE.md) for the complete contract
+of every named function, including internal helpers. See
+[`BUG_AUDIT.md`](BUG_AUDIT.md) for the repository-wide defect audit, fixes, and
+remaining model-level limitations. See
+[`PHYSICELL_INTEGRATION.md`](PHYSICELL_INTEGRATION.md) for growing a
+lineage-enabled PhysiCell tumor and simulating barcode plus mitochondrial
+recording data on its branches. See
+[`ORGANOID_SIMULATION.md`](ORGANOID_SIMULATION.md) for the 2,500-founder
+neural-organoid workflow.
 
 ## 1. Purpose
 
@@ -100,10 +106,10 @@ bash bash_wrapper_all_combos.sh -d <params_dir> \
 For each file in the directory, the wrapper:
 
 1. Invokes `Rscript sim5_code.R -P <file>`. The simulator generates a
-   13-digit `unique_run_id` and writes its outputs under several `output/<...>/<run_id>/`
+   numeric `unique_run_id` and writes its outputs under several `output/<...>/<run_id>/`
    subdirectories (see §6).
-2. Locates the most recently written run id by listing `output/processed_fastas/`
-   in modification order.
+2. Reads the completed run id from the simulator’s `UNIQUE_RUN_ID=<id>` output,
+   avoiding ambiguity when multiple runs share an output directory.
 3. For every `*_TERM.fasta` (terminal-timepoint sequences, excluding any
    pre-existing `*_msa.fasta`), runs `muscle -align` and then
    `iqtree -m HKY -bb 1000 -alrt 1000 -nstep 80 -nt 40` to produce a
@@ -125,15 +131,118 @@ For each file in the directory, the wrapper:
 8. **(Optional)** If `-r <reference>` was supplied, calls
    `Rscript generate_sc_profiles_from_bash.r -I <run_id> -R <reference> ...`
    to fit scDesign3 on the supplied reference scRNA-seq dataset and synthesise
-   per-cell expression profiles for every cell alive at every stopping point
+   per-cell expression profiles for every living terminal cell at every stopping point
    (see §9). The fit is cached under `output/scdesign3_fits/` keyed by reference
    path + mtime + size, so subsequent runs against the same reference reuse it.
 
 Each iteration prints the per-file wall-time via the bash `SECONDS` builtin.
 
-> Note: `sim5_code.R` line 67 contains a hard-coded `setwd(...)` pointing at
-> `/dartfs/rc/lab/M/McKennaLab/projects/Aidan/simulations/r_sim_clean`. Update
-> this to your local project root before running outside that environment.
+`sim5_code.R` resolves its project directory from its own script path, so the
+wrapper can be launched from another working directory.
+
+### 4.1 PhysiCell lineage replay
+
+With the lineage-enabled PhysiCell checkout at `../PhysiCell`, the complete
+10,000-cell workflow is:
+
+```bash
+bash run_physicell_10000_pipeline.sh
+```
+
+The runner stages and compiles
+`user_projects/tumor_3D_lineage`, grows the tumor to 10,000 current cells,
+imports `cell_lineage.csv` and `lineage_table.csv`, and writes base-editing
+barcode plus mitochondrial observations under a timestamped
+`output/physicell_10000_*` directory. It does not modify the PhysiCell
+checkout. The default recording parameters are in
+`example_json_params/physicell_10000.json`.
+
+Supplying a reference dataset adds covariate-linked scDesign3 expression:
+
+```bash
+bash run_physicell_10000_pipeline.sh \
+  --sc-reference data/tumor_reference.rds \
+  --sc-celltype-col cell_type \
+  --sc-use-pseudotime
+```
+
+The optional expression stage uses the same `cell_<PhysiCell_ID>` sample names
+as the barcode, mitochondrial, and tree outputs. Lineage depth is mapped to the
+reference pseudotime range. `--sc-spatial-cols ref_x,ref_y` additionally maps
+PhysiCell x/y positions to reference spatial coordinates.
+
+To replay an existing lineage without running PhysiCell:
+
+```bash
+Rscript simulate_physicell_lineage.R \
+  --lineage path/to/cell_lineage.csv \
+  --live-cells path/to/lineage_table.csv \
+  --params example_json_params/physicell_10000.json \
+  --end-time 1440 \
+  --modalities both \
+  --output-dir output/physicell/my_run
+```
+
+The adapter converts PhysiCell's retained-parent-ID division events into a
+binary event tree and evolves heritable barcode profiles and sparse
+mitochondrial haplotypes over its exact branch durations. The current-cell
+table is optional but recommended because division events alone do not
+identify cells removed before the final snapshot. Full input contracts,
+outputs, assumptions, and a fixture are in
+[`PHYSICELL_INTEGRATION.md`](PHYSICELL_INTEGRATION.md).
+
+### 4.2 Neural organoid development
+
+The cortical-organoid MVP starts from 2,500 individually tracked iPSCs. Its
+default `early21` preset uses a 24-hour iPSC cycle, 8-day radial-glia and NPC
+cycles, and a reduced NPC-to-neuron transition hazard to target approximately
+25% neurons at day 21. Radial glia produce explicit neural progenitor cells,
+which produce neurons. A separate direct iPSC-to-epithelial branch defaults to
+a 2% commitment probability and a 100-cell cap. The model simulates seven
+developmental states in a spatial oxygen/nutrient environment, then adds
+founder-resolving barcodes,
+mitochondrial recording, and optional state-linked scDesign3 counts:
+
+```bash
+bash run_physicell_organoid_pipeline.sh
+```
+
+Use `--epithelial-probability` and `--max-epithelial-cells` to tune or disable
+the limited epithelial side population.
+
+The full seed-2 calibration produced 104,804 cells at day 21: 25,986 neurons
+(24.79%), 60,213 NPCs, 18,499 radial glia, and 99 surviving epithelial cells
+from 100 epithelial commitments.
+
+To add a BASELINE-like Cas12a recorder and mitochondrial lineage tracing to
+the same PhysiCell tree, use:
+
+```bash
+bash run_physicell_organoid_baseline_pipeline.sh \
+  --output-dir output/organoid_baseline_day21
+```
+
+This preset creates five independently inherited recorder integrations with
+50 primary targets each, adds founder-resolving positions, and emits aligned
+sparse Cas12a, mitochondrial, and combined lineage-feature matrices. See
+[`ORGANOID_SIMULATION.md`](ORGANOID_SIMULATION.md) for the model assumptions
+and output contract.
+
+With a longitudinal organoid reference:
+
+```bash
+bash run_physicell_organoid_pipeline.sh \
+  --sc-reference data/cortical_organoid_reference.rds \
+  --sc-celltype-col cell_type \
+  --sc-pseudotime-col pseudotime
+```
+
+The staged model preserves all day-zero founders, records cell-state
+transitions, and supplies final cell type, developmental pseudotime, culture
+day, spatial position, oxygen, nutrient, and recording burdens to scDesign3.
+Its default biological rates are working assumptions that require calibration;
+the model contract, smoke-test command, outputs, and current boundaries are in
+[`ORGANOID_SIMULATION.md`](ORGANOID_SIMULATION.md).
 
 ## 5. JSON parameter file
 
@@ -141,7 +250,9 @@ Each iteration prints the per-file wall-time via the bash `SECONDS` builtin.
 top-level keys fall into the following groups.
 
 ### 5.1 Population dynamics
-- `num_init_cells` — number of founder cells (typically `1`).
+- `num_init_cells` — number of founder cells (typically `1`). Multiple founders
+  receive independent division schedules and share a synthetic time-zero root
+  in ground-truth Newick output.
 - `sim_length` — array of stopping points; the simulation captures output at
   each entry.
 - `time_inc` — simulation timestep. `"auto"` derives a GCD across all per-cell-type
@@ -150,9 +261,12 @@ top-level keys fall into the following groups.
 
 ### 5.2 Mitochondrial genome dynamics
 - `mito_genome_length` (e.g. 16600 for human mtDNA),
-- `average_genomes_per_mito`, `starting_mito_per_cell`, `max_mito_per_cell`,
-- `mito_inheritance_pattern` — `"random"`, `"directed"`, or `"stabilizing"`
-  (governs how mitos are distributed to daughter cells in `mito_dynamics`),
+- `average_genomes_per_mito`, `starting_mito_per_cell`,
+- `max_mito_per_cell` — retained as a saturation setting in the parameter
+  schema, but not currently enforced by `mito_dynamics()`; see the bug audit,
+- `mito_inheritance_pattern` — currently `"random"` only (governs how
+  mitochondria are distributed to daughter cells in `mito_dynamics`; other
+  values fail explicitly because those models are not implemented),
 - `fusion_events_per_mito_per_division`,
   `split_events_per_mito_per_division` — Poisson rates for fusion / fission
   events per cell cycle,
@@ -299,11 +413,23 @@ All artefacts live under `output/`. Each simulation creates a fresh
 | `output/lineplots/<run_id>/` | `make_lineplot()` | sim-length and cell-count line plots per modality |
 | `output/sc_profiles/<run_id>/` | `generate_sc_profiles_from_bash.r` | one `sim_sce_all.rds` plus per-stopping-point `sim_sce_time_<t>.rds` (`SingleCellExperiment`s with simulated counts), `cell_metadata.csv`, `cell_count_summary.csv`. Only written when `-r` is supplied. |
 | `output/scdesign3_fits/` | `generate_sc_profiles_from_bash.r` | cached scDesign3 fits keyed by SHA1 of reference path + mtime + size + formula bits. Shared across runs. |
+| `output/physicell/<lineage_stem>/` | `simulate_physicell_lineage.R` | imported event tree, terminal metadata, barcode and mitochondrial profiles/events, allele/heteroplasmy matrices, and FASTA/Newick exports |
+| `output/physicell_10000_<timestamp>/` | `run_physicell_10000_pipeline.sh` | staged PhysiCell build, raw lineage export, logs/manifests, and combined lineage-recording output; optional scDesign3 output is under `lineage_recording/sc_profiles/` |
 
 ## 7. Source files
 
 ### Entry points
 - **`bash_wrapper_all_combos.sh`** — top-level orchestrator described in §4.
+- **`run_physicell_10000_pipeline.sh`** — end-to-end staged PhysiCell build,
+  10,000-cell tumor run, dual-modality lineage-recording replay, and optional
+  scDesign3 expression generation.
+- **`simulate_physicell_lineage.R`** — dependency-light PhysiCell adapter.
+  Reads `time,parent_ID,daughter_ID`, converts persistent parent IDs into
+  event-resolved binary branches, and writes simulated barcode and/or
+  mitochondrial observations using the selected remote_mito JSON parameters.
+- **`generate_physicell_sc_profiles.R`** — fits/reuses scDesign3 on a real
+  reference and simulates terminal-cell counts using PhysiCell-linked
+  covariates.
 - **`sim5_code.R`** *(~3.9k lines)* — the simulator. Parses the JSON, builds
   per-cell-type substitution probability matrices and per-position target /
   non-target mutation probability lists, initialises the heteroplasmy sparse
@@ -317,13 +443,15 @@ All artefacts live under `output/`. Each simulation creates a fresh
   `get_new_be_targets` / `get_new_nuc_targets` (editing-window expansion),
   `estimate_prob_per_timept`, `draw_severity_scores`,
   `logistic_prob_survive_given_score`, `mito_dynamics`,
-  `reassign_genome_inds`, `setup_sim`, `multi_core_func`,
-  `all_processes_at_stopping_point`, `join_endpoint_results`,
+  `reassign_genome_inds`, `sample_induced_cells`,
+  `initialize_founder_population`, `setup_sim`, `multi_core_func`,
+  `create_ground_truth_tree`, `all_processes_at_stopping_point`, `join_endpoint_results`,
   `make_lineplot`. The script ends by calling `setup_sim` once and then
   iterating `multi_core_func` over `poss_times`.
 
 ### Sourced modules (loaded by `sim5_code.R`)
-- **`fit_plot_parameters.R`** — fits smoothing splines from
+- **`fit_plot_parameters.R`** — standalone legacy utility (not sourced by the
+  simulator) that fits smoothing splines from
   `imported_heatmap_plotval_dat.csv` so that `get_heatmap_params(num_cells)`
   returns suitable y-position, height, font size, and figure dimensions for
   cell-population heatmaps. Writes a diagnostic plot
@@ -390,12 +518,18 @@ All artefacts live under `output/`. Each simulation creates a fresh
   cell types.
 
 ### Single-cell profile generation
+- **`scdesign3_helpers.R`** — corrected shared scDesign3 reference loader,
+  cache key, marginal/copula fitting, and `new_covariate` simulation helpers.
+- **`physicell_scdesign3.R`** — joins PhysiCell terminal/tree/spatial data with
+  barcode edit burden and mitochondrial heteroplasmy summaries, aligns
+  pseudotime/spatial ranges to the reference, and writes linked SCE outputs.
 - **`generate_sc_profiles_from_bash.r`** — `optparse` CLI that bolts scDesign3
   onto the simulator. Loads every `cell_population_*_time_*.rds` snapshot for a
   given run id, builds a per-cell covariate frame (`cell_id` = simulator
   `linstring`, `cell_type` from the simulator's `celltype` field, `lineage_depth`
   = number of underscores in the linstring, `pseudotime` = `lineage_depth /
   max_depth`, `birth_time`, `induced_editing`, `timepoint`, `is_terminal`),
+  with a unique `sample_id` for each cell-timepoint observation,
   loads a reference scRNA-seq dataset (SCE `.rds`, Seurat `.rds`, or `.h5ad`),
   fits scDesign3 once (`construct_data` -> `fit_marginal` -> `fit_copula`,
   cached under `output/scdesign3_fits/`), then calls `extract_para` + `simu_new`
@@ -422,10 +556,51 @@ All artefacts live under `output/`. Each simulation creates a fresh
 
 ## 9. scDesign3 single-cell profile step (optional)
 
-Behaviour: every cell in `cell_population_*_time_*.rds` for which `alive == TRUE`
-is treated as a sampled cell. Each gets a row of simulated counts. Internal vs
-terminal cells are distinguished by the `is_terminal` colData column (TRUE only
-at the last entry of the JSON `sim_length` array).
+For a PhysiCell run, pass `--sc-reference` to
+`run_physicell_10000_pipeline.sh`, or invoke the stage independently:
+
+```bash
+Rscript generate_physicell_sc_profiles.R \
+  --run-dir output/physicell_10000_<timestamp> \
+  --reference data/tumor_reference.rds \
+  --celltype-col cell_type \
+  --use-pseudotime \
+  --other-covariates barcode_edit_fraction
+```
+
+Every requested model covariate must exist in both the reference `colData` and
+the generated PhysiCell metadata. Available generated fields include
+`lineage_depth`, `lineage_pseudotime`, `birth_time`, `branch_length`, `x`, `y`,
+`z`, `tumor_radius`, `neighbor_count`, `barcode_edit_count`,
+`barcode_edit_fraction`, `mt_variant_count`, and
+`mt_heteroplasmy_burden`. Covariates are always retained as metadata but only
+affect expression when requested through pseudotime, spatial options,
+`--other-covariates`, or an explicit `--mu-formula`.
+
+PhysiCell expression outputs are:
+
+- `sim_sce_final.rds` — feature-by-terminal-cell `SingleCellExperiment`;
+- `simulated_counts.rds` — the same count assay, sparse when `Matrix` is
+  available;
+- `cell_metadata.csv.gz` and `cell_count_summary.csv.gz`; and
+- `scdesign3_manifest.csv.gz` — reference, model formula, package version, and
+  seed.
+
+PhysiCell-linked R stages gzip CSV tables by default. Use
+`--compress-csv false` with either R CLI for legacy `.csv` output; downstream
+readers accept both forms.
+
+The PhysiCell pipeline also writes
+`mutation_event_descendant_matrix_sparse.rds`, a literal sampled-cell by
+unique-event ground-truth ancestry matrix, and
+`mutation_event_descendant_manifest.csv.gz`, which maps every column back to
+its barcode or mitochondrial mutation-log row.
+
+Behaviour: every current leaf cell in `cell_population_*_time_*.rds` for which
+`alive == TRUE` and `terminal == TRUE` is treated as a sampled cell. Each gets a
+row of simulated counts. Cells observed at earlier stopping points later become
+internal ancestors; `is_terminal` in the expression output is TRUE only for
+observations from the last entry of the JSON `sim_length` array.
 
 What scDesign3 needs that the simulator does not provide:
 
@@ -456,7 +631,7 @@ Outputs (under `output/sc_profiles/<run_id>/`):
 - `sim_sce_all.rds` — `SingleCellExperiment` covering every cell at every
   stopping point.
 - `sim_sce_time_<t>.rds` — same, split per stopping-point timepoint.
-- `cell_metadata.csv` — `cell_id, cell_type, lineage_depth, birth_time,
+- `cell_metadata.csv` — `cell_id, sample_id, cell_type, lineage_depth, birth_time,
   induced_editing, timepoint, is_terminal, pseudotime`.
 - `cell_count_summary.csv` — `(timepoint, cell_type, is_terminal) -> n_cells`.
 
@@ -467,11 +642,6 @@ and a fresh fit is produced.
 
 ## 10. Notes and limitations
 
-- The hard-coded `setwd(...)` near the top of `sim5_code.R` ties the script to
-  the original cluster path. Edit it for any new environment.
-- The bash wrapper assumes that "the most recently written run id" in
-  `output/processed_fastas/` is the one produced by the just-finished
-  simulation. Concurrent runs against the same `output/` directory will race.
 - Score-matrix files in `phylips/` are presently saved as `.fasta`; the
   commented `.phy` lines in `bash_wrapper_all_combos.sh` are kept around for
   future reuse.

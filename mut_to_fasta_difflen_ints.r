@@ -12,25 +12,25 @@ get_profiles_ints_and_umis <- function(cell_pop,
       # print(paste0('num_ints was null, now its ', num_ints))
     }
     
-    num_ints_recovered <- max(c(rbinom(n = 1, size = num_ints, prob = int_rec_prob), 1)) # RECOVER AT LEAST ONE
-    which_ints_recovered <- sort(sample(seq(1, num_ints), size = num_ints_recovered,
-                                        replace = FALSE))
+    num_ints_recovered <- rbinom(
+      n = 1,
+      size = num_ints,
+      prob = int_rec_prob
+    )
+    which_ints_recovered <- if(num_ints_recovered > 0){
+      sort(sample.int(num_ints, size = num_ints_recovered, replace = FALSE))
+    } else{
+      integer(0)
+    }
     
     if(bc_or_mt == 'bc'){
       
-      mut_mat <- cell$incoming_bc_profiles[which_ints_recovered, ]
+      mut_mat <- cell$incoming_bc_profiles[which_ints_recovered, , drop = FALSE]
     } else if(bc_or_mt == 'mt'){
-      mut_mat <- cell$incoming_mt_profiles[which_ints_recovered, ]    
+      mut_mat <- cell$incoming_mt_profiles[which_ints_recovered, , drop = FALSE]
+    } else{
+      stop("bc_or_mt must be either 'bc' or 'mt'.")
     }
-    
-    # by default, slicing one row from a matrix converts to numeric in R
-    if(num_ints_recovered == 1){
-      mut_mat <- matrix(mut_mat, nrow = 1)
-    }
-    
-    
-    
-    
     
     return_list <- list()
     return_list[['mut_mat']] <- mut_mat
@@ -100,11 +100,11 @@ get_one_cell_sequence <- function(cell_int_mat, ref_seq, these_bc_int_umis = NUL
   
   # cell_int_mat will be an n_s x l matrix where n_s is the number of downsampled integrations in the cell and l is the barcode length
   
-  list_of_seqs <- lapply(seq(1, nrow(cell_int_mat)), function(int_num){
+  list_of_seqs <- lapply(seq_len(nrow(cell_int_mat)), function(int_num){
     
     this_int <- cell_int_mat[int_num, ]
     
-    bases <- sapply(seq(1, length(this_int)), function(pos_num){
+    bases <- sapply(seq_along(this_int), function(pos_num){
       if(this_int[pos_num] %% 1){ # insertion
         res <- ins_to_charvec(ins = this_int[pos_num],
                               pos_num = pos_num,
@@ -145,13 +145,13 @@ write_all_cell_sequences <- function(cell_mutmats, reference, output_fasta_name,
   if(!is.null(bc_integration_umis)){
 
     
-    all_cell_seqs <- parLapply(cl = one_cluster, seq(1, length(cell_mutmats)), function(cellnum){
+    all_cell_seqs <- parLapply(cl = one_cluster, seq_along(cell_mutmats), function(cellnum){
       get_one_cell_sequence(cell_int_mat = cell_mutmats[[cellnum]],
                             these_bc_int_umis = bc_integration_umis[[cellnum]],
                             ref_seq = reference)
     })  
   } else{
-    all_cell_seqs <- parLapply(cl = one_cluster, seq(1, length(cell_mutmats)), function(cellnum){
+    all_cell_seqs <- parLapply(cl = one_cluster, seq_along(cell_mutmats), function(cellnum){
       get_one_cell_sequence(cell_int_mat = cell_mutmats[[cellnum]],
                             ref_seq = reference)
     })
@@ -159,6 +159,27 @@ write_all_cell_sequences <- function(cell_mutmats, reference, output_fasta_name,
   
   # adjust fasta name to account for terminal cells only (deprecated reason)
   updated_output_fasta_path <- gsub(pattern = '(.*)(\\.fasta)$', replacement = paste0('\\1_', fasta_type, '\\2'), x = output_fasta_name)
-  write.fasta(all_cell_seqs, names = names(cell_mutmats), file.out = updated_output_fasta_path)
+  cells_with_sequences <- lengths(all_cell_seqs) > 0
+  if(any(!cells_with_sequences)){
+    warning(
+      sprintf(
+        'Omitting %d cells with no recovered sequences from %s.',
+        sum(!cells_with_sequences),
+        basename(updated_output_fasta_path)
+      ),
+      call. = FALSE
+    )
+  }
+  all_cell_seqs <- all_cell_seqs[cells_with_sequences]
+  sequence_names <- names(cell_mutmats)[cells_with_sequences]
+  if(length(all_cell_seqs) == 0){
+    writeLines(character(), updated_output_fasta_path)
+    return(invisible(updated_output_fasta_path))
+  }
+  write.fasta(
+    all_cell_seqs,
+    names = sequence_names,
+    file.out = updated_output_fasta_path
+  )
+  invisible(updated_output_fasta_path)
 }
-

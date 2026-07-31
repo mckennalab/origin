@@ -9,16 +9,14 @@ make_cell_type_transition_lists <- function(cell_type_names = cell_type_names){
   induced_TM_list <- list()
   
   if(length(cell_type_names) != length(uninduced_TM)){
-    print('uninduced TM is incompatible with provided cell types')
-    quit(save = 'no', status = 0)
+    stop('Uninduced transition matrix is incompatible with provided cell types.')
   }
   if(length(cell_type_names) != length(induced_TM)){
-    print('induced TM is incompatible with provided cell types')
-    quit(save = 'no', status = 0)
+    stop('Induced transition matrix is incompatible with provided cell types.')
   }
   
-  for(i in 1:length(cell_type_names)){
-    for(j in 1:length(cell_type_names)){
+  for(i in seq_along(cell_type_names)){
+    for(j in seq_along(cell_type_names)){
       uninduced_TM_list[[cell_type_names[i]]][[cell_type_names[j]]] <- uninduced_TM[[i]][j]
       induced_TM_list[[cell_type_names[i]]][[cell_type_names[j]]] <- induced_TM[[i]][j]
     }
@@ -31,4 +29,3 @@ make_cell_type_transition_lists <- function(cell_type_names = cell_type_names){
   
   
 }
-

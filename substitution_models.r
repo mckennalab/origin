@@ -46,6 +46,18 @@ k80_sub_rate_mat <- function(transition_to_transversion_ratio = NULL, transition
   
   # abbreviate input param
   ttv <- transition_to_transversion_ratio
+
+  supplied <- c(!is.null(ttv), !is.null(transition_rate), !is.null(transversion_rate))
+  if(sum(supplied) < 2){
+    stop('K80 requires at least two of ratio, transition_rate, and transversion_rate.')
+  }
+  supplied_values <- c(ttv, transition_rate, transversion_rate)
+  if(any(!is.finite(supplied_values)) || any(supplied_values < 0)){
+    stop('K80 parameters must be finite and non-negative.')
+  }
+  if(is.null(transversion_rate) && ttv == 0){
+    stop('Cannot derive transversion_rate from a zero transition/transversion ratio.')
+  }
   
   # if the ratio is unspecified, calculate it
   if(is.null(ttv)){
@@ -121,6 +133,10 @@ f81_sub_rate_mat <- function(frac_a,
   # substitution rates weighted by to-base's fraction of the entire sequence. 
   
   
+  if(baseline_overall_sub_rate == 0){
+    return(matrix(0, nrow = 4, ncol = 4))
+  }
+
   # general approach is to compute the deviation away from 0.25 that each base fraction is,
   # then adjust the mean overall substitution rate accordingly 
   to_a_rate <- baseline_overall_sub_rate*(1 + (frac_a - 0.25))
@@ -169,6 +185,27 @@ hky_sub_rate_mat <- function(frac_a, frac_g, frac_c, frac_t, transition_to_trans
   
   # rename
   ttv <- transition_to_transversion_ratio
+
+  supplied <- c(
+    !is.null(ttv),
+    !is.null(baseline_transition_rate),
+    !is.null(baseline_transversion_rate)
+  )
+  if(sum(supplied) < 2){
+    stop(
+      paste(
+        'HKY requires at least two of ratio, baseline_transition_rate,',
+        'and baseline_transversion_rate.'
+      )
+    )
+  }
+  supplied_values <- c(ttv, baseline_transition_rate, baseline_transversion_rate)
+  if(any(!is.finite(supplied_values)) || any(supplied_values < 0)){
+    stop('HKY rate parameters must be finite and non-negative.')
+  }
+  if(is.null(baseline_transversion_rate) && ttv == 0){
+    stop('Cannot derive baseline_transversion_rate from a zero ratio.')
+  }
   
   if(is.null(ttv)){
     ttv <- baseline_transition_rate / baseline_transversion_rate
@@ -179,13 +216,27 @@ hky_sub_rate_mat <- function(frac_a, frac_g, frac_c, frac_t, transition_to_trans
   if(is.null(baseline_transversion_rate)){
     baseline_transversion_rate <- baseline_transition_rate / ttv
   }
+  if(baseline_transition_rate == 0 && baseline_transversion_rate == 0){
+    return(matrix(0, nrow = 4, ncol = 4))
+  }
   
-  # account for both nucleotide composition of sequence as well as ttv
-  # see notebook for formula derivation/logic
-  from_a_rate <- baseline_transition_rate * c(0, ttv*(1+(frac_g - 0.25)), 1+(frac_c - 0.25), 1+(frac_t - 0.25))
-  from_g_rate <- baseline_transition_rate * c(ttv*(1+(frac_g - 0.25)), 0, 1+(frac_c - 0.25), 1+(frac_t - 0.25))
-  from_c_rate <- baseline_transition_rate * c(ttv*(1+(frac_g - 0.25)), 1+(frac_c - 0.25), 0, 1+(frac_t - 0.25))
-  from_t_rate <- baseline_transition_rate * c(ttv*(1+(frac_g - 0.25)), 1+(frac_c - 0.25), 1+(frac_t - 0.25), 0)
+  # Account for both nucleotide composition and the transition/transversion
+  # rates. Each off-diagonal rate is weighted by the destination nucleotide;
+  # A<->G and C<->T use baseline_transition_rate and all other pairs use
+  # baseline_transversion_rate.
+  destination_weights <- 1 + (c(frac_a, frac_g, frac_c, frac_t) - 0.25)
+  from_a_rate <- destination_weights * c(
+    0, baseline_transition_rate, baseline_transversion_rate, baseline_transversion_rate
+  )
+  from_g_rate <- destination_weights * c(
+    baseline_transition_rate, 0, baseline_transversion_rate, baseline_transversion_rate
+  )
+  from_c_rate <- destination_weights * c(
+    baseline_transversion_rate, baseline_transversion_rate, 0, baseline_transition_rate
+  )
+  from_t_rate <- destination_weights * c(
+    baseline_transversion_rate, baseline_transversion_rate, baseline_transition_rate, 0
+  )
   
   prenormalized_mat <- rbind(from_a_rate,
                              from_g_rate,
@@ -281,7 +332,7 @@ SIMPLIFY_target_site_gamma_based_sub_rates <- function(sequence_length, h_pos, m
   total_num_targets <- length(l_pos) + length(m_pos) + length(h_pos)
   
   # if there are no targets, exit early
-  if(length(total_num_targets) == 0){
+  if(total_num_targets == 0){
     return(list())
   }
 
@@ -371,13 +422,28 @@ nontarget_scale_gamma_heterogeneity <- function(position_er_list, shape_param = 
   # substitution rate by a random draw from these aggregated metrics (or a random draw from the entire distribution, if 
   # num_discrete_bins == 0)
   
+  if(length(position_er_list) == 0 || shape_param == 0){
+    return(position_er_list)
+  }
+  if(!is.finite(shape_param) || shape_param < 0 ||
+     !is.finite(scale_param) || scale_param <= 0){
+    stop('shape_param and scale_param must define a positive finite gamma distribution.')
+  }
+  if(!(bin_agg_metric %in% c('mean', 'median'))){
+    stop("bin_agg_metric must be either 'mean' or 'median'.")
+  }
+  if(length(num_discrete_bins) != 1 || is.na(num_discrete_bins) ||
+     num_discrete_bins < 0 || num_discrete_bins %% 1 != 0){
+    stop('num_discrete_bins must be one non-negative integer.')
+  }
+
   rgam_vals <- rgamma(n = 10000, shape = shape_param, scale = scale_param)
   
   if(length(unique(rgam_vals)) == 1){
     # if we're encoding zero heterogeneity, break early
-    for(i in 1:length(position_er_list)){
-      for(j in 1:length(position_er_list[[i]])){
-        position_er_list[[i]][[j]] <- rgam_vals[1]
+    for(i in seq_along(position_er_list)){
+      for(j in seq_along(position_er_list[[i]])){
+        position_er_list[[i]][[j]] <- position_er_list[[i]][[j]] * rgam_vals[1]
       }
     }
     
@@ -428,8 +494,8 @@ nontarget_scale_gamma_heterogeneity <- function(position_er_list, shape_param = 
   # this is the relevance of the nested loop
   # in other cases, only one scaling factor per position will be necessary 
   # print(as.numeric(position_er_list))
-  for(i in 1:length(position_er_list)){
-    for(j in 1:length(position_er_list[[i]])){
+  for(i in seq_along(position_er_list)){
+    for(j in seq_along(position_er_list[[i]])){
       scaling_factor <- sample(hetero_scales, size = 1)[1]
       position_er_list[[i]][[j]] <- position_er_list[[i]][[j]] * scaling_factor
     }
@@ -440,4 +506,3 @@ nontarget_scale_gamma_heterogeneity <- function(position_er_list, shape_param = 
   
   
 }
-

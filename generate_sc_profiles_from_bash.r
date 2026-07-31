@@ -18,6 +18,16 @@
 #   BiocManager::install(c("scDesign3", "SingleCellExperiment", "zellkonverter"))
 #   install.packages(c("optparse", "rjson", "digest"))
 
+script_argument <- commandArgs(trailingOnly = FALSE)[
+  grepl('^--file=', commandArgs(trailingOnly = FALSE))
+][1]
+script_path <- normalizePath(
+  sub('^--file=', '', script_argument),
+  mustWork = TRUE
+)
+repo_root <- dirname(script_path)
+source(file.path(repo_root, 'scdesign3_helpers.R'))
+
 suppressPackageStartupMessages({
   library(optparse)
   library(rjson)
@@ -136,8 +146,12 @@ list_cell_population_files <- function(cell_pop_dir) {
 build_covariate_df <- function(cellpop_files, celltype_map = NULL) {
   per_tp <- lapply(seq_len(nrow(cellpop_files)), function(i) {
     cp <- readRDS(cellpop_files$path[i])
-    alive <- vapply(cp, function(c) isTRUE(c$alive), logical(1))
-    cp <- cp[alive]
+    sampled <- vapply(
+      cp,
+      function(c) isTRUE(c$alive) && isTRUE(c$terminal),
+      logical(1)
+    )
+    cp <- cp[sampled]
     if (length(cp) == 0) return(NULL)
     data.frame(
       cell_id = vapply(cp, function(c) c$linstring, character(1)),
@@ -170,6 +184,10 @@ build_covariate_df <- function(cellpop_files, celltype_map = NULL) {
     meta$cell_type_sim <- meta$cell_type
     meta$cell_type <- new_ct
   }
+  # A lineage can be alive at several stopping points, so cell_id alone is not
+  # unique in the combined output. sample_id identifies one cell-timepoint
+  # observation and is safe for matrix/SingleCellExperiment column names.
+  meta$sample_id <- make.unique(paste0(meta$cell_id, '_time_', meta$timepoint))
   meta
 }
 
@@ -189,93 +207,25 @@ maybe_downsample <- function(meta, max_per_tp) {
 
 # ---- scDesign3 fit (cached) and simulate --------------------------------------
 ref_cache_key <- function(ref_path, celltype_col, use_pseudotime, pseudotime_col) {
-  fi <- file.info(ref_path)
-  payload <- paste(normalizePath(ref_path), fi$mtime, fi$size,
-                   celltype_col, use_pseudotime, pseudotime_col, sep = '|')
-  if (requireNamespace('digest', quietly = TRUE)) {
-    digest::digest(payload, algo = 'sha1')
-  } else {
-    sprintf('%x', sum(utf8ToInt(payload)))
-  }
+  scdesign3_fit_cache_key(
+    ref_path,
+    celltype_col = celltype_col,
+    pseudotime_col = pseudotime_col,
+    use_pseudotime = use_pseudotime
+  )
 }
 
 fit_or_load <- function(sce, cache_path, use_pseudotime, ncores) {
-  if (file.exists(cache_path)) {
-    message(sprintf('Loading cached scDesign3 fit: %s', cache_path))
-    return(readRDS(cache_path))
-  }
-  suppressPackageStartupMessages(library(scDesign3))
-  mu_formula <- if (use_pseudotime) {
-    'cell_type + s(pseudotime, k = 4, bs = "cr")'
-  } else {
-    'cell_type'
-  }
-  pseudotime_arg <- if (use_pseudotime) 'pseudotime' else NULL
-  message('Fitting scDesign3 on reference (cached afterwards) ...')
-  dat <- construct_data(sce = sce, assay_use = 'counts',
-                        celltype = 'cell_type',
-                        pseudotime = pseudotime_arg,
-                        spatial = NULL, other_covariates = NULL,
-                        corr_by = '1',
-                        parallelization = 'mclapply', n_cores = ncores)
-  marginal_list <- fit_marginal(data = dat, predictor = 'gene',
-                                mu_formula = mu_formula,
-                                sigma_formula = '1',
-                                family_use = 'nb',
-                                n_cores = ncores, usebam = FALSE)
-  copula_list <- fit_copula(sce = sce, assay_use = 'counts',
-                            marginal_list = marginal_list,
-                            family_use = 'nb', copula = 'gaussian',
-                            n_cores = ncores, input_data = dat$dat)
-  fit <- list(sce = sce, dat = dat,
-              marginal_list = marginal_list,
-              copula_list = copula_list,
-              use_pseudotime = use_pseudotime,
-              mu_formula = mu_formula)
-  saveRDS(fit, cache_path)
-  message(sprintf('Cached fit at %s', cache_path))
-  fit
+  fit_or_load_scdesign3(
+    sce,
+    cache_path,
+    use_pseudotime = use_pseudotime,
+    ncores = ncores
+  )
 }
 
 simulate_for_meta <- function(fit, new_meta, ncores) {
-  suppressPackageStartupMessages({
-    library(scDesign3)
-    library(SingleCellExperiment)
-  })
-  ref_levels <- levels(colData(fit$sce)$cell_type)
-  unknown <- setdiff(unique(new_meta$cell_type), ref_levels)
-  if (length(unknown) > 0) {
-    stop(sprintf('Cell types absent from reference: %s. Use --celltype_map to remap.',
-                 paste(unknown, collapse = ', ')))
-  }
-  new_cov <- if (fit$use_pseudotime) {
-    data.frame(cell_type = factor(new_meta$cell_type, levels = ref_levels),
-               pseudotime = new_meta$pseudotime,
-               corr_group = factor('1'),
-               stringsAsFactors = FALSE)
-  } else {
-    data.frame(cell_type = factor(new_meta$cell_type, levels = ref_levels),
-               corr_group = factor('1'),
-               stringsAsFactors = FALSE)
-  }
-
-  para_new <- extract_para(sce = fit$sce, marginal_list = fit$marginal_list,
-                           n_cores = ncores, family_use = 'nb',
-                           new_covariate = new_cov, data = fit$dat$dat)
-  new_count <- simu_new(sce = fit$sce,
-                        mean_mat = para_new$mean_mat,
-                        sigma_mat = para_new$sigma_mat,
-                        zero_mat = para_new$zero_mat,
-                        quantile_mat = NULL,
-                        copula_list = fit$copula_list,
-                        n_cores = ncores,
-                        family_use = 'nb',
-                        input_data = fit$dat$dat,
-                        new_covariate = new_cov,
-                        important_feature = rep(TRUE, nrow(fit$sce)))
-  rownames(new_count) <- rownames(fit$sce)
-  colnames(new_count) <- new_meta$cell_id
-  new_count
+  simulate_scdesign3_counts(fit, new_meta, ncores = ncores)
 }
 
 # ---- Main --------------------------------------------------------------------
@@ -301,7 +251,7 @@ new_count <- simulate_for_meta(fit, meta, opt$ncores)
 suppressPackageStartupMessages(library(SingleCellExperiment))
 sim_sce <- SingleCellExperiment(
   assays = list(counts = new_count),
-  colData = S4Vectors::DataFrame(meta, row.names = meta$cell_id)
+  colData = S4Vectors::DataFrame(meta, row.names = meta$sample_id)
 )
 saveRDS(sim_sce, file.path(opt$output_dir, 'sim_sce_all.rds'))
 

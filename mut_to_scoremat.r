@@ -1,49 +1,45 @@
 group_deletions <- function(deletion_df){
-  
-  streak <- 1
-  
-  new_del_mat_list <- lapply(seq(2, nrow(deletion_df)), function(deletion_num){
-    
-    # if part of the same cell and integration AND
-    # if the current mutation position is one greater than the previous
-    # BUG: misplaced parenthesis. The intended check is
-    #   positions_mutated[deletion_num] == positions_mutated[deletion_num - 1] + 1
-    # but the parens make it (positions == positions_prev) + 1, i.e. logical->int yielding
-    # 1 (when equal) or 2 (when not — TRUE? no, FALSE+1=1, TRUE+1=2). Either way the value
-    # is non-zero and `&` treats it as TRUE, so the adjacency check is dead. As written,
-    # any pair of deletions sharing linstring + integration is treated as a contiguous
-    # streak regardless of whether the positions actually neighbour each other.
-    if((deletion_df$linstring[deletion_num] == deletion_df$linstring[deletion_num - 1]) &
-       (deletion_df$ints_mutated[deletion_num] == deletion_df$ints_mutated[deletion_num - 1]) &
-       (deletion_df$positions_mutated[deletion_num] == deletion_df$positions_mutated[deletion_num - 1]) + 1){
-      streak <<- streak + 1
-      
-      # check if this deletion is the last one in the dataset
-      if(deletion_num == nrow(deletion_df)){
-        
-        return_vec <- c(deletion_df$linstring[deletion_num],
-                        deletion_df$ints_mutated[deletion_num],
-                        deletion_df$positions_mutated[deletion_num], 
-                        paste0('d', streak))
-        
-        return(return_vec)
-      }
-      
-      return(NULL)
-    } else{
-      
-      return_vec <- c(deletion_df$linstring[deletion_num],
-                      deletion_df$ints_mutated[deletion_num],
-                      deletion_df$positions_mutated[deletion_num], 
-                      paste0('d', streak))
-      streak <<- 1
-      return(return_vec)
+  if(nrow(deletion_df) == 0){
+    return(matrix(character(), nrow = 0, ncol = ncol(deletion_df),
+                  dimnames = list(NULL, colnames(deletion_df))))
+  }
+
+  deletion_df <- deletion_df[
+    order(deletion_df$linstring,
+          deletion_df$ints_mutated,
+          deletion_df$positions_mutated),
+    ,
+    drop = FALSE
+  ]
+
+  grouped_rows <- list()
+  streak_start <- 1L
+  output_index <- 1L
+
+  for(row_index in seq_len(nrow(deletion_df))){
+    is_last <- row_index == nrow(deletion_df)
+    continues <- !is_last &&
+      deletion_df$linstring[row_index + 1L] == deletion_df$linstring[row_index] &&
+      deletion_df$ints_mutated[row_index + 1L] == deletion_df$ints_mutated[row_index] &&
+      deletion_df$positions_mutated[row_index + 1L] ==
+        deletion_df$positions_mutated[row_index] + 1
+
+    if(!continues){
+      streak_length <- row_index - streak_start + 1L
+      grouped_rows[[output_index]] <- c(
+        as.character(deletion_df$linstring[row_index]),
+        as.character(deletion_df$ints_mutated[row_index]),
+        as.character(deletion_df$positions_mutated[row_index]),
+        paste0('d', streak_length)
+      )
+      output_index <- output_index + 1L
+      streak_start <- row_index + 1L
     }
-  }) 
-  
-  new_del_mat <- do.call(rbind, new_del_mat_list)                                      
-  
-  return(new_del_mat)
+  }
+
+  grouped <- do.call(rbind, grouped_rows)
+  colnames(grouped) <- colnames(deletion_df)
+  grouped
 }
 
 score_mat_to_phylip <- function(score_mat, output_phylip_path) {
@@ -266,7 +262,7 @@ create_one_score_mat <- function(profiles,condense, urid, savename_prefix, mt_or
   }
   
   # get all combinations of cell x int x position x mutation
-  all_mut_combos <- lapply(seq(1, length(profiles)), function(cell_num){
+  all_mut_combos <- lapply(seq_along(profiles), function(cell_num){
     
     
     
@@ -515,18 +511,12 @@ create_one_score_mat <- function(profiles,condense, urid, savename_prefix, mt_or
     
     for(cell in rownames(cellmut_mat_cp1)){
       rec <- recovered_ints[[cell]]
-      # BUG: this checks the entire `recovered_ints` list (which is never NULL at this
-      # point — it's the function argument we just indexed into) instead of the per-cell
-      # lookup `rec`. For cells that aren't keys in `recovered_ints`, `rec` is NULL but
-      # this guard never fires, and the `which(!(int_nums_in_muts %in% rec))` below ends
-      # up flagging EVERY column as missing (since `x %in% NULL` is all FALSE), so those
-      # rows get fully NA-masked rather than partially. Should be `if(is.null(rec))`.
-      if(is.null(recovered_ints)){
+      if(is.null(rec)){
         rec <- integer(0)
       }
       
       missing_features <- which(!(int_nums_in_muts %in% rec))
-      if(length(missing_features) > 1){
+      if(length(missing_features) > 0){
         cellmut_mat_cp1[cell, missing_features] <- NA
       }
     }
@@ -642,5 +632,3 @@ get_norm_cell_heteroplasmy_scores <- function(cell_mut_counts,
   
   
 }
-
-
