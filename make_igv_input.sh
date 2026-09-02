@@ -24,8 +24,12 @@ seq_path_base="${seq_path%.fasta}"
 
 # checks if paths are empty strings
 if [ -z "${ref_path}" ] || [ -z "${seq_path}" ]; then
-	usage
+		usage
 
+fi
+if [ ! -f "$ref_path" ] || [ ! -f "$seq_path" ]; then
+		echo "Both input paths must point to existing files." >&2
+		exit 1
 fi
 
 # helper function that converts from fasta to fastq
@@ -33,14 +37,30 @@ fasta_to_fastq() {
   local input_fasta_path=$1
   local output_fastq_path=$2
 
-  awk 'BEGIN {FS="\n"}
-       {
-         if (NR % 2 == 1) {
-           print "@" substr($1, 2)
-         } else {
-           print $0 "\n+\n" gensub(".", "I", "g", $0)
-         }
-       }' "$input_fasta_path" > "$output_fastq_path"
+	  awk '
+	    function emit_record(quality) {
+	      if (header == "") return
+	      quality = sequence
+	      gsub(/./, "I", quality)
+	      print "@" header
+	      print sequence
+	      print "+"
+	      print quality
+	    }
+	    /^>/ {
+	      emit_record()
+	      header = substr($0, 2)
+	      sequence = ""
+	      next
+	    }
+	    {
+	      gsub(/[[:space:]]/, "", $0)
+	      sequence = sequence $0
+	    }
+	    END {
+	      emit_record()
+	    }
+	  ' "$input_fasta_path" > "$output_fastq_path"
 
 }
 
@@ -69,6 +89,5 @@ bwa mem "${ref_path}" "$fastq_path" > "$sam_path"
 samtools view -h "$sam_path" | samtools view -Sb - > "$bam_path"
 samtools sort "$bam_path" > "$igv_input_bam_path"
 samtools index "$igv_input_bam_path"
-
 
 

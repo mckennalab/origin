@@ -1,0 +1,25 @@
+Package: origin
+Title: Forward-Time Simulation of Lineage-Recording Cell Populations
+Version: 0.1.0
+Authors@R:
+    person("Aaron", "McKenna", email = "aaronatwpi@gmail.com", role = c("aut", "cre"))
+Description: Simulates growing cell populations that carry lineage recorders and
+    replays recorder state along the resulting lineages. Populations come from a
+    continuous-time Gillespie engine or from an imported PhysiCell division
+    history. Recorders include base-editing and nuclease barcode arrays, prime
+    editing, PALINCODE, mitochondrial genomes with heteroplasmy, and
+    extrachromosomal DNA. Outputs are ground-truth trees plus the character and
+    sequence matrices used to reconstruct them.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Depends:
+    R (>= 4.1)
+Imports:
+    Matrix,
+    methods,
+    stats,
+    utils
+Suggests:
+    testthat (>= 3.0.0)
+Roxygen: list(markdown = FALSE)
+Config/roxygen2/version: 8.0.0

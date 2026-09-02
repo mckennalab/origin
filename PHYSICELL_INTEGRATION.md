@@ -28,7 +28,7 @@ By default it:
    requested seed/thread count, and suppress intermediate full/SVG snapshots;
 3. compiles and runs the 3-D tumor;
 4. validates its division and current-cell CSVs; and
-5. replays both recording modalities with
+5. replays the requested recording modalities (`both` by default) with
    `example_json_params/physicell_10000.json`.
 
 The PhysiCell source checkout is not modified. Run `--help` for all controls;
@@ -42,6 +42,70 @@ bash run_physicell_10000_pipeline.sh \
   --seed 1 \
   --jobs 8 \
   --output-dir output/my_physicell_run
+```
+
+Use `--modalities lineage` when only the event-resolved ground-truth tree is
+needed. This retains `lineage_nodes`, `terminal_cells`, and both Newick trees
+without paying the substantially larger barcode and mitochondrial replay
+cost.
+
+## Replicated conventional-Visium sections
+
+The spatial-lineage wrapper runs independent tumors and analyzes several
+virtual sections from each:
+
+```bash
+bash run_physicell_visium_replicates.sh \
+  --replicates 5 \
+  --target-cells 10000 \
+  --slice-offsets=-50,0,50 \
+  --section-thickness 5 \
+  --spot-diameter 55 \
+  --spot-pitch 100
+```
+
+The default conventional 6.5-mm grid contains 4,992 synthetic spot IDs: 78
+rows with 64 alternating even/odd array columns. Only cell centers inside the
+5-micron section and a circular spot footprint are treated as captured;
+section cells in the gaps between spots remain in `slice_cells.csv.gz` but not
+in `spot_cell_membership.csv.gz`.
+
+The 10,000-cell example tumor covers only several conventional spots because
+its physical diameter is much smaller than a 6.5-mm capture area. Increase
+`--target-cells` (for example, to `100000`) when more occupied spots are needed;
+the analysis intentionally does not rescale the tumor relative to the array.
+
+Ground-truth relatedness is reported in complementary units:
+
+- elapsed time from sampling back to the MRCA;
+- patristic elapsed-time distance between the two cells;
+- number of lineage-tree edges separating them; and
+- whether they descend from the same founder.
+
+The primary `cell_distance_summary.csv.gz` bins these quantities by projected
+cell-cell distance and compares them with shuffled lineage-tip locations. The
+spot-level tables first average across the cell pairs underlying each spot
+pair, preventing high-cellularity spots from silently dominating the Visium-
+resolution summary. Batch aggregation treats tumors, rather than cell pairs,
+as independent replicates.
+
+For an existing completed tumor, run only the section analysis:
+
+```bash
+Rscript analyze_physicell_visium.R \
+  --run-dir output/physicell_10000_20260726_171340 \
+  --slice-offsets=-50,0,50
+```
+
+The parameterized R notebook
+[`notebooks/physicell_visium_lineage_distance.Rmd`](notebooks/physicell_visium_lineage_distance.Rmd)
+plots physical distance against MRCA age and division distance at cell and
+spot resolution. It accepts one analysis directory or the root of a replicate
+batch. Render it without opening RStudio using:
+
+```bash
+Rscript render_physicell_visium_notebook.R \
+  --input-path output/physicell_visium_YYYYMMDD_HHMMSS
 ```
 
 Use a new or empty output directory. The pipeline writes its resolved inputs,
@@ -187,8 +251,9 @@ Other options are:
   default `cell_type_dict.founder_cell_type`.
 - `--editing-state auto|induced|uninduced`: `auto` switches all branches at
   `editing_induction.timepoint`; the other choices force one rate block.
-- `--modalities barcode|mitochondrial|both`: output modality; default
-  `barcode`. A comma-delimited `barcode,mitochondrial` value is also accepted.
+- `--modalities lineage|barcode|mitochondrial|ecDNA|both|all`: output modality;
+  default `barcode`. `lineage` writes only ground truth; comma-delimited values
+  such as `lineage,barcode` are also accepted.
 - `--num-integrations`: integrations simulated per terminal cell; default is
   the largest value in `max_bc_ints_per_cell`.
 - `--mt-genomes-per-cell`: fixed mitochondrial genome bottleneck/resampling

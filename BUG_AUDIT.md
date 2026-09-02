@@ -1,6 +1,6 @@
 # Bug audit
 
-Audit date: 2026-07-25
+Audit date: 2026-07-29
 
 The audit covered every tracked R and shell source file, the example JSON, the
 main simulator’s function-call wiring, the PhysiCell fixed-tree adapters, and
@@ -27,18 +27,22 @@ dependency-light reproductions for the highest-risk fixes.
 | Substitution setup | F81/HKY/GTR received raw nucleotide counts instead of fractions, and absent bases produced `NULL`. | Compute a complete named A/G/C/T fraction vector once. |
 | HKY | The transition multiplier was applied to incorrect cells (mostly destination G) and multiplied an already-transition-scaled baseline a second time. | Build destination-weighted rates with transition multipliers only on A↔G and C↔T. |
 | Heterogeneity | `shape_param = 0` replaced all background mutation rates with zero; a degenerate gamma draw replaced rates instead of scaling them. | Interpret zero shape as “no heterogeneity” and always apply nonzero draws multiplicatively. |
+| Background mutation sampling | Position-specific probabilities were averaged before drawing a global edit count, then coordinates were sampled with replacement. This distorted heterogeneous rates and lost edits to duplicate coordinates. | Draw one binomial count per position using its configured probability and sample distinct integration rows without replacement. |
 | Target-rate generation | The no-target test checked `length(total_num_targets)`, which is always one for a scalar, then attempted an invalid gamma cut. | Test `total_num_targets == 0` and return an empty list. |
+| Target mutation sampling | `sapply()` simplification discarded target-position names for multi-integration results, and replacement sampling produced fewer unique edits than the binomial draw. | Preserve a named list through coordinate assembly and sample distinct eligible integrations without replacement. |
 | Prime editing | Integer guide translation returned the entire lookup table for every base, producing the same malformed string for every guide. | Translate each integer through its individual lookup entry. |
 | Target transversions | The nonuniform transversion path omitted required destination bases and crashed; forced conversions also did not use `be_conversion_pattern`. | Build the destination vector and pass the configured BE destination base through simulator and worker calls. |
 | Transversions in insertions | A list slice (`[`) was used where a numeric transversion vector (`[[`) was required, causing invalid matrix subscripting. | Extract the numeric option vector with `[[`. |
 | Mitochondrial invariants | Only position 1 was eligible because the code used `length(mito_genome_length)` instead of the length value. | Use `seq_len(mito_genome_length)`. |
 | Founder mt profiles | The mitochondrion map used Poisson genome counts, while the profile and heteroplasmy setup used unrelated fixed/max row counts. Map indices and profile rows could diverge. | Set the founder genome count and profile dimensions to the realized sum of per-mitochondrion genome counts. |
+| Founder population | `num_init_cells` was passed into `setup_sim()` but population initialization always created only cell `1`. | Create one independent founder record and division schedule per configured cell; join multiple roots beneath a synthetic time-zero root in Newick output. |
 | Mitochondrial dropout | Dynamic list removal used the literal field `$mito_num`, so selected mitochondria remained in daughter maps after their profile rows were removed; surviving map indices were also stale after row deletion. | Remove selected dynamic list names and reindex every surviving map to the subsetted profile. |
 | Mitochondrial fission | Binomial fission could create an empty daughter mitochondrion. | Condition the split so both products receive at least one genome. |
 | Heteroplasmy fitness | Severity-map keys used the loop ordinal rather than the actual mt genomic position, so later mutation names did not match their seeded scores. | Key variants with `heteroplasmy_inds[ind_num]`. |
 | Heteroplasmy helper | A zero-variant branch called the misspelled `iteger()`. | Use `integer()`. |
 | Score matrices | Deletion adjacency had a misplaced parenthesis, so all deletions in one cell/integration became one run; boundary rows were also attributed to the wrong run. | Reimplement run grouping over sorted cell/integration/position rows. |
 | Score matrices | Missing-integration masking checked the entire recovery list instead of the current cell, and skipped the case of exactly one missing feature. | Check the per-cell vector and mask whenever at least one feature is missing. |
+| Molecular recovery | Recovery used `max(binomial_draw, 1)`, making zero recovery impossible and inflating low recovery rates. | Honor the binomial draw exactly and return a well-formed zero-row profile when no molecule is recovered. |
 | Result aggregation | Induced transition columns were renamed using the uninduced loop length. | Iterate over induced columns and validate both matrices against all cell-type pairs. |
 | Result aggregation | Every parsed cell type received the first sampling fraction from the filename. | Parse the contiguous `cell-type-rate` block in one pass. |
 | Result aggregation | `make_results_df()` returned the final `print()` value rather than its data frame. | Return the written data frame explicitly. |
@@ -54,6 +58,8 @@ dependency-light reproductions for the highest-risk fixes.
 | Single-cell profiles | Historical parents remain `alive` but are no longer terminal leaves; they were resampled at later snapshots. | Include only cells with both `alive` and `terminal` set. |
 | Single-cell profiles | The scDesign3 adapter passed an unsupported `n_cores` argument and invalid `mclapply` value to `construct_data()`, so it failed against current scDesign3. | Use the 1.10 API and its supported `mcmapply` parallelization value. |
 | Single-cell profiles | The complete `fit_copula()` return object was passed where `simu_new()` requires its `copula_list`; filtered-gene metadata was also omitted. | Retain the structured copula fit and pass `copula_list`, `important_feature`, and `filtered_gene` explicitly. |
+| Editing induction | Fractional editing induction drew one Bernoulli value per living cell and passed the resulting vector as `sample(size=...)`, crashing populations larger than one. | Draw a single binomial count and sample that many cells through the shared induction helper. |
+| Parallel reproducibility | The configured seed initialized only the main R process, leaving PSOCK worker streams uncontrolled. | Initialize deterministic worker streams with `clusterSetRNGStream()` while preserving the main process RNG state. |
 
 ## Known limitations not changed
 

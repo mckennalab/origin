@@ -1,8 +1,15 @@
 # remote_mito_clean
 
 This document describes the repository’s simulation and analysis workflow.
+The code is split into an installable simulator package (`origin/`), a sourced
+analysis tier (`analysis/`), and the legacy sim5 engine (`legacy/`); see
+[`REPO_LAYOUT.md`](REPO_LAYOUT.md) for what lives where and which entry point
+to use.
 See [`FUNCTION_REFERENCE.md`](FUNCTION_REFERENCE.md) for the complete contract
-of every named function, including internal helpers. See
+of every named function, including internal helpers. Every R source file also
+carries its documentation inline: a header block stating the file’s purpose,
+prerequisites, command-line arguments and outputs, and a roxygen (`#'`) block
+above each function giving its parameters, return shape, and side effects. See
 [`BUG_AUDIT.md`](BUG_AUDIT.md) for the repository-wide defect audit, fixes, and
 remaining model-level limitations. See
 [`PHYSICELL_INTEGRATION.md`](PHYSICELL_INTEGRATION.md) for growing a
@@ -191,6 +198,94 @@ identify cells removed before the final snapshot. Full input contracts,
 outputs, assumptions, and a fixture are in
 [`PHYSICELL_INTEGRATION.md`](PHYSICELL_INTEGRATION.md).
 
+### 4.1.1 Replicated Visium spatial-lineage experiment
+
+`run_physicell_visium_replicates.sh` runs independent PhysiCell tumors, takes
+virtual tissue sections, overlays a conventional 6.5-mm Visium array, and
+measures ground-truth lineage distance as a function of spatial distance. The
+default array follows the documented conventional Visium geometry: 4,992
+spots in 78 staggered rows with 64 spots per row, 55-micron spots, and
+100-micron center-to-center spacing. It models a 5-micron section and randomly
+rotates/translates the array for every section.
+
+Run five 10,000-cell tumor replicates with three sections per tumor:
+
+```bash
+bash run_physicell_visium_replicates.sh \
+  --replicates 5 \
+  --target-cells 10000 \
+  --slice-offsets=-50,0,50 \
+  --jobs 8
+```
+
+The wrapper requests `--modalities lineage` by default. This writes the exact
+event tree and skips barcode/mitochondrial replay, which is unnecessary for a
+ground-truth spatial-lineage analysis. Set `--modalities both` to retain those
+simulated observations as well. Completed replicates and analyses are reused
+when the command is restarted.
+
+Analyze an already completed tumor without rerunning PhysiCell:
+
+```bash
+Rscript analyze_physicell_visium.R \
+  --run-dir output/physicell_10000_20260726_171340 \
+  --slice-offsets=-50,0,50
+```
+
+Every `visium_spatial/slice_*` directory contains:
+
+| File | Contents |
+| --- | --- |
+| `visium_spots.csv.gz` | All 4,992 synthetic spots with Space Ranger-style array row/column coordinates, physical coordinates, tissue flag, and cell count. |
+| `slice_cells.csv.gz` | Every cell center intersecting the section, including cells falling in the gaps between spots. |
+| `spot_cell_membership.csv.gz` | Cells captured by the 55-micron spot footprints and their spot assignments. |
+| `cell_pair_lineage_sample.csv.gz` | Cell pairs with 2-D/3-D distance, MRCA age, patristic distance, division distance, founder identity, and spot identity. |
+| `cell_distance_summary.csv.gz` | Cell-distance correlogram and tip-label-permutation null enrichment. |
+| `spot_pair_lineage.csv.gz` | Mean lineage relationship for each sampled within-spot or between-spot cell mixture. |
+| `spot_distance_summary.csv.gz` | Equal-spot-pair lineage summary as a function of spot-center distance. |
+| `visium_slice.png` | Section cells and occupied spot footprints. |
+| `cell_lineage_correlogram.png` | Observed and spatially permuted mean MRCA age curves. |
+
+The batch-level `aggregate/` directory first pools slices within each tumor
+replicate, then reports the mean, standard deviation, and standard error across
+independent tumors. This avoids treating the many cell pairs from one tumor as
+independent biological replicates. Pair queries use a preprocessed parent
+table rather than a complete quadratic tree-distance matrix. Above the exact
+pair limit, uniformly sampled pairs are retained separately within each
+distance bin; the sampling mode and evaluated counts are written to the
+summary.
+
+Conventional Visium is not single-cell resolution. The exported membership
+table therefore records the simulated cells contributing to each spot; it
+does not relabel a mixed spot as one cell. This stage models spatial capture
+geometry but not molecule-level RNA diffusion, UMI sampling, or histology-
+based tissue detection.
+
+A 10,000-cell PhysiCell spheroid is only a small region relative to a 6.5-mm
+capture area; the existing example occupies roughly 7--9 spots per central
+section. It is suitable for pipeline testing, but `--target-cells 100000` or
+larger is preferable when the goal is a richer multi-spot spatial curve. The
+spot table still contains all 4,992 array positions so the physical scale is
+never silently rescaled to make a small tumor appear slide-sized.
+
+Open [`notebooks/physicell_visium_lineage_distance.Rmd`](notebooks/physicell_visium_lineage_distance.Rmd)
+in RStudio for an interactive notebook of physical distance versus MRCA age,
+patristic/lineage-edge distance, recent-relative enrichment, within-spot versus
+between-spot relationships, projection effects, and per-section statistics.
+Set the `input_path` parameter to either one `visium_spatial/` directory or a
+complete replicate batch. Render the same notebook from the command line with:
+
+```bash
+Rscript render_physicell_visium_notebook.R \
+  --input-path output/physicell_visium_YYYYMMDD_HHMMSS \
+  --output-file output/physicell_visium_report.html
+```
+
+For a replicate batch, sections are averaged within each tumor before the
+notebook calculates across-tumor means and standard errors. The dense pair
+plots are reproducibly downsampled only for display; their binned curves use
+the full summaries saved by the analysis.
+
 ### 4.2 Neural organoid development
 
 The cortical-organoid MVP starts from 2,500 individually tracked iPSCs. Its
@@ -243,6 +338,429 @@ day, spatial position, oxygen, nutrient, and recording burdens to scDesign3.
 Its default biological rates are working assumptions that require calibration;
 the model contract, smoke-test command, outputs, and current boundaries are in
 [`ORGANOID_SIMULATION.md`](ORGANOID_SIMULATION.md).
+
+## Exact Gillespie lineage simulation
+
+The native, non-spatial population simulator can now run either on the legacy
+time grid or as an exact continuous-time birth/death process. The timestep
+engine remains the default. To select Gillespie in an existing parameter file,
+add:
+
+```json
+"simulation_engine": "gillespie",
+"gillespie": {
+  "modalities": ["barcode", "mitochondrial"],
+  "max_cells": 1000000,
+  "num_integrations": 5,
+  "founder_label_sites": 0,
+  "mt_genomes_per_cell": 8,
+  "progress": true,
+  "progress_updates": 20,
+  "compress_csv": true
+}
+```
+
+The usual entry point dispatches from the JSON automatically:
+
+```bash
+Rscript sim5_code.R -P parameters.json
+```
+
+It can also be run directly, with command-line values overriding the optional
+`gillespie` block:
+
+```bash
+Rscript simulate_gillespie_lineage.R \
+  --params parameters.json \
+  --modalities both \
+  --end-time 21 \
+  --output-dir output/gillespie/day21
+```
+
+Division has hazard `1 / cell_cycle_length`. A configured death probability
+`p` per cycle becomes the exact hazard `-log(1-p) / cell_cycle_length`.
+Daughter types are sampled from the existing induced or uninduced transition
+matrix at division. Editing and differentiation induction occur at their exact
+configured times; selected cells get explicit continuation nodes so partial
+induction states are inherited without moving the boundary to a timestep.
+
+Conditional on this continuous-time tree, barcode and mitochondrial mutation
+processes are simulated at exact event times with cell-type-specific hazards.
+This separation is mathematically equivalent to one joint Gillespie process
+because recording mutations do not change population propensities. For that
+reason, Gillespie currently rejects `consider_cell_heteroplasmy_scores: true`.
+The mitochondrial overlay uses a fixed-genome division bottleneck and does not
+replay the legacy organelle fusion/fission counts.
+
+In addition to the standard lineage, recorder, sparse feature, literal
+event-descendant, Newick, compressed CSV, and timing artifacts, the engine
+writes `gillespie_population_events.csv.gz`,
+`gillespie_division_events.csv.gz`, `gillespie_checkpoint_summary.csv.gz`, and
+`gillespie_cell_states.csv.gz`. The latter is accepted directly by the
+covariate-linked scDesign3 entry point:
+
+```bash
+Rscript generate_physicell_sc_profiles.R \
+  --run-dir output/gillespie/day21 \
+  --reference data/reference.rds \
+  --use-pseudotime
+```
+
+### Quick continuous-time versus time-step comparison
+
+Use the population-only comparison script to quantify discretization effects
+without paying the cost of barcode, mitochondrial, tree, or transcriptome
+output for every replicate:
+
+```bash
+Rscript compare_simulation_engines.R \
+  --params example_json_params/short_test.json \
+  --replicates 100 \
+  --time-step 1 \
+  --output-dir output/engine_comparison/short_test
+```
+
+Both engines use the same division/death hazards, differentiation induction,
+and daughter cell-type transition matrices. The time-step version permits at
+most one competing division/death event per cell per interval, with event
+probability `1-exp(-(division_hazard+death_hazard)*dt)`; this is the discrete
+population approximation used to expose grid-size bias. The comparison does
+not run either recording overlay.
+
+Outputs include per-replicate outcomes and cell-type counts, an aggregate table
+of continuous/time-step means and differences, and
+`engine_comparison.png`. Repeat with successively smaller `--time-step` values
+to check convergence toward continuous time.
+
+## Paired lineage-recorder benchmark simulation
+
+`run_lineage_benchmark.R` creates simulation inputs for a separate tree-
+reconstruction benchmark. It does not infer trees. The default design uses:
+
+- ground-truth samples of 250, 1,000, 2,000, and 5,000 cells;
+- 1, 2, 5, 10, and 20 integrations;
+- BASELINE-like recording with 50 primary targets per integration;
+- prime editing with six fixed pegRNAs per integration and efficiencies from
+  0.90 to 0.15;
+- PALINCODE with two cBits per integration;
+- mitochondrial lineage tracing with a fixed 32-genome intracellular pool and
+  nested observations of 1, 2, 5, 10, or 20 sampled genomes per cell;
+- balanced, comb-like, neutral asynchronous, and hierarchical
+  stem/progenitor/terminal population shapes; and
+- ten population seeds.
+
+Run the complete default benchmark with:
+
+```bash
+Rscript run_lineage_benchmark.R \
+  --output-dir output/lineage_benchmark
+```
+
+The run is resumable by default. To run a small pilot:
+
+```bash
+Rscript run_lineage_benchmark.R \
+  --output-dir output/lineage_benchmark_pilot \
+  --shapes balanced,neutral \
+  --tree-sizes 250,1000 \
+  --integration-counts 1,5,20 \
+  --mt-observation-depths 1,5,20 \
+  --seeds 1:2
+```
+
+The largest population and integration panel are simulated only once for each
+shape, seed, and recorder. Mitochondrial evolution is likewise simulated once
+with 32 modeled genomes per cell; observation-depth conditions use the first
+1/2/5/10/20 genomes from a reproducibly shuffled, without-replacement sampling
+order. Smaller conditions are nested deterministic subsets of the same cells,
+integrations, and mitochondrial observations. Change the modeled mitochondrial
+pool with `--mt-genomes-per-cell`; every `--mt-observation-depths` value must be
+no larger than that pool. The default performs 40 population simulations and
+160 full recording simulations to produce 3,200 paired reconstruction-input
+conditions. An optional
+`turnover` shape is available through `--shapes`; use `--help` for all controls.
+The mitochondrial benchmark preset uses a 16,569-base reference, no founder
+heteroplasmy or indels, and a Jukes-Cantor substitution probability of
+`2e-6` per alternate base per cell cycle.
+
+Every condition directory contains:
+
+| File | Contents |
+| --- | --- |
+| `ground_truth_tree.nwk` | Exact sampled ground-truth topology with elapsed-time branch lengths. |
+| `recording_logical_target_matrix_sparse.rds` | Recommended cross-system matrix: categorical integrated-recorder targets or binary mitochondrial variant presence. |
+| `recording_state_matrix_sparse.rds` | Native recorder state matrix; for mitochondria, sampled variant fractions (heteroplasmy). |
+| `recording_character_matrix_sparse.rds` | Native reconstruction characters; for mitochondria, binary variant presence. |
+| `target_manifest.csv.gz` | Integration/target definitions and logical-state encoding. |
+| `sample_cells.csv.gz` | Ordered tree tips and population metadata. |
+| `condition_manifest.csv.gz` | Seeds, dimensions, logical target counts, and paths to shared event output. |
+
+For BASELINE, the logical matrix encodes the within-target editing-window
+pattern as a stable nonzero integer bitmask, so one physical target remains one
+logical character. Prime-editing logical states are `0/1`; PALINCODE logical
+states are `0=WT`, `1=left`, `2=right`, and `3=both`. The native matrices remain
+available for reconstruction methods that explicitly model base-level or
+one-hot outcomes. Mitochondrial condition directories also provide explicit
+aliases: `mitochondrial_variant_fraction_matrix_sparse.rds`,
+`mitochondrial_binary_variant_matrix_sparse.rds`, and
+`mitochondrial_variant_manifest.csv.gz`. Their manifests report
+`observation_depth` and leave `integrations` unset.
+
+Full 20-integration mutation-event tables and recorder parameters are stored
+once under each `recorder_<system>/full_20_integrations/` directory.
+Mitochondrial events, terminal genome profiles, reference FASTA, observation
+matrices, and sampling orders are stored under
+`recorder_mitochondrial/full_32_genomes_per_cell/`. The root
+`benchmark_manifest.csv.gz` is the reconstruction job table and links every
+condition to its ground truth and recording matrices. Dense CSV matrices are
+disabled because of their size; add `--write-dense-csv true` only when needed.
+
+## Unified prime-editing recorder
+
+The native time-step simulator, exact Gillespie simulator, and imported
+PhysiCell lineage replay now share one prime-editing backend. Recorder targets
+are defined by `nuclease_targets`; the backend assigns one known pegRNA from a
+pool to each target. Every pool entry has its own editing efficiency, and every
+integration inherits the same target-to-pegRNA layout plus a unique static ID.
+
+The pool can be a CSV referenced relative to the parameter JSON:
+
+```json
+"nuclease_targets": {
+  "num_targets": 4,
+  "config": "S:5:5",
+  "edit_rate_class_fractions": {"high": 1, "medium": 0, "low": 0},
+  "editing_window": {"size": 0, "decaying": false, "close_after_edit": true},
+  "prime_editing_system": true
+},
+"prime_editing_backend": {
+  "enabled": true,
+  "pegRNA_pool_path": "../data/example_pegRNA_pool.csv",
+  "target_pegRNA_ids": ["peg_A", "peg_B", "peg_C", "peg_D"],
+  "induced_edit_probability_per_cell_cycle": 0.4,
+  "uninduced_edit_probability_per_cell_cycle": 0.0,
+  "static_id_length": 12
+}
+```
+
+The required pool columns are `pegRNA_id`, `edit_sequence`, and
+`editing_efficiency`. IDs must be unique, edit sequences must contain only
+A/C/G/T, and efficiencies must be in `[0,1]`. Optional columns are
+`spacer_sequence`, `pbs_sequence`, `rtt_sequence`, and `description`. The same
+rows may instead be embedded as an array of objects under
+`prime_editing_backend.pegRNAs`.
+
+`target_pegRNA_ids` gives an exact assignment and must contain one pool ID per
+target. If it is omitted, `assignment` may be `cycle` (the default),
+`sample_with_replacement`, or `sample_without_replacement`. Scalar induced and
+uninduced base probabilities apply to all targets; a vector can set one base
+probability per target. For base probability `p` and pegRNA efficiency `e`, the
+effective per-cycle probability is `1 - (1 - p)^e`. Thus efficiency zero
+disables a pegRNA, efficiency one preserves the base rate, and intermediate
+values scale the event hazard.
+
+Run the included continuous-time example with:
+
+```bash
+Rscript simulate_gillespie_lineage.R \
+  --params example_json_params/prime_editing_gillespie.json
+```
+
+The same JSON block works with `simulate_physicell_lineage.R`, or with
+`sim5_code.R -P parameters.json` when `simulation_engine` is `timestep` or
+`gillespie`. The old `num_unique_prime_editing_guides` and
+`prime_editing_guide_length` fields remain as a compatibility fallback that
+generates a random, unit-efficiency pool when no known pool is supplied.
+
+Event-resolved PhysiCell and Gillespie output uses locked `0=unedited` and
+`1=edited` states, retains the exact programmed sequence in
+`mutation_events.csv.gz`, and writes:
+
+| File | Contents |
+| --- | --- |
+| `prime_editing_target_manifest.csv.gz` | Static integration ID, pegRNA assignment, exact edit/template fields, raw efficiency, and base/effective probabilities. |
+| `prime_editing_state_matrix_sparse.rds` | Cell-by-integrated-target categorical state matrix. |
+| `prime_editing_character_matrix_sparse.rds` | Binary cell-by-integrated-target character matrix for reconstruction. |
+| `barcode_binary_score_matrix_sparse.rds` | Compatibility alias of the prime-editing character matrix. |
+
+Dense runs write the corresponding `.csv.gz` matrices. The legacy time-step
+path writes the exact target assignment to its run-spec
+`prime_editing_target_manifest.csv` and uses the same efficiency-adjusted
+target probabilities while retaining its existing insertion-profile encoding.
+
+## PALINCODE palindromic cBits
+
+The event-resolved PhysiCell and Gillespie pipelines support the PALINCODE
+recorder described in
+[`paper/2026.04.16.718941v1.full.pdf`](paper/2026.04.16.718941v1.full.pdf).
+Each palindromic cBit begins wild type and irreversibly resolves at its first
+event to a left edit, right edit, or rare simultaneous edit of both sides. A
+resolved site cannot later acquire the opposite-side edit. This follows the
+paper's evidence that the dual class is primarily a simultaneous event and
+that pre-edited targets have much lower subsequent activity.
+
+PALINCODE is selected by adding a `palincode_adapter` block:
+
+```json
+"physicell_adapter": {
+  "recorder_system": "PALINCODE",
+  "profile_storage": "sparse",
+  "compact_output": true,
+  "retain_internal_profiles": false
+},
+"palincode_adapter": {
+  "enabled": true,
+  "num_cbits_per_integration": 2,
+  "cbit_names": ["PalT7", "PalRNF2"],
+  "static_id_length": 12,
+  "uninduced_edit_probability_per_cbit_per_cell_cycle": 0.0,
+  "induced_edit_probability_per_cbit_per_cell_cycle": [0.15, 0.08],
+  "left_edit_fraction": [0.495, 0.35],
+  "right_edit_fraction": [0.495, 0.64],
+  "both_edit_fraction": [0.01, 0.01]
+}
+```
+
+Probability fields accept either one value shared by every cBit or one value
+per cBit. For each target, the three outcome fractions must sum to one. The
+per-cell-cycle edit probability is converted to a continuous-time hazard using
+the branch's cell-type-specific cycle length. Conditional on the first event,
+one left/right/both outcome is drawn and locked. The paper explored editing
+rates from 0.1% to 75% per generation and reported its highest reconstruction
+accuracy around 5–25%; the example intentionally uses target-specific values
+in that range rather than treating them as experimentally fitted rates.
+
+Run the eight-generation, 30-cBit example with:
+
+```bash
+Rscript simulate_gillespie_lineage.R \
+  --params example_json_params/palincode_gillespie.json
+```
+
+or replay PALINCODE on a PhysiCell tree with the same parameter schema:
+
+```bash
+Rscript simulate_physicell_lineage.R \
+  --lineage divisions.csv \
+  --live-cells live_cells.csv \
+  --params parameters_with_palincode.json \
+  --modalities barcode \
+  --num-integrations 15
+```
+
+State values are `0=wild type`, `1=left`, `2=right`, and `3=both`. The main
+PALINCODE outputs are:
+
+| File | Contents |
+| --- | --- |
+| `barcode_target_layout.csv.gz` | Static 12-nt integration IDs, cBit names, edit rates, and left/right/both fractions. |
+| `mutation_events.csv.gz` | Exact event times and `palincode_left`, `palincode_right`, or `palincode_both` outcomes. |
+| `palincode_state_matrix_sparse.rds` | Cell-by-cBit categorical state matrix using values 0–3. |
+| `palincode_character_matrix_sparse.rds` | One-hot left/right/both characters; wild type is all zero. |
+| `barcode_binary_score_matrix_sparse.rds` | Compatibility alias of the PALINCODE one-hot character matrix. |
+
+The one-hot matrix preserves edit orientation in combined lineage features and
+can be passed to reconstruction methods that expect binary characters. The
+simulator intentionally records which side was edited, matching the simple
+outcome encoding used for the paper's trees; it does not currently expand each
+side into its individual within-window adenine-to-guanine combinations. The
+legacy native timestep simulator still uses its original nucleotide barcode
+mutation engine; PALINCODE currently runs through the imported-PhysiCell or
+exact-Gillespie event-resolved pipelines.
+
+## Non-Mendelian ecDNA barcodes
+
+Both fixed PhysiCell trees and Gillespie trees can carry a third recording
+modality consisting of randomly segregating ecDNA species. The nearest whole
+number to a configured fraction of founder ecDNA species is labeled (or set
+`num_labeled_species` for an exact count). Every labeled species receives
+an immutable static ID and a small irreversible CRISPR target array; unlabeled
+species propagate copy number but produce no recorder state.
+
+Add an `ecdna_adapter` block to the native parameter JSON:
+
+```json
+"ecdna_adapter": {
+  "num_species": 10,
+  "initial_copies_per_species": 5,
+  "labeled_species_fraction": 0.25,
+  "static_id_length": 12,
+  "num_recorder_targets": 6,
+  "edit_probability_per_target_per_cell_cycle": 0.01,
+  "recorder_start_time": 0,
+  "replication_probability": 1.0,
+  "daughter_1_segregation_probability": 0.5,
+  "max_copies_per_cell": 10000
+}
+```
+
+Selection against non-Mendelian markers is configured independently of the
+cellular tree:
+
+```json
+"non_mendelian_selection": {
+  "coefficient": 0.0,
+  "ecdna_label_coefficient": 0.05,
+  "ecdna_recorder_edit_coefficient": 0.01,
+  "mitochondrial_variant_coefficient": 0.02
+}
+```
+
+All coefficients use the standard range `0 <= s <= 1`; zero is neutral. The
+global `coefficient` is a fallback for any omitted marker-specific value.
+Labeled ecDNA copies receive relative extra-replication propensity `1-s`, and
+each recorder edit contributes another factor of `1-s`. Mitochondrial genomes
+are sampled into a daughter with relative weight `(1-s)^k`, where `k` is that
+genome's variant count. For ecDNA, a coefficient of one blocks additional
+replication but existing copies still segregate; for mitochondria, it excludes
+variant-bearing genomes from the bottleneck when wild-type genomes are present.
+
+The mitochondrial replay currently fixes total `genomes_per_cell`, so this
+controls selection against mitochondrial *variant burden*, not selection on
+total mitochondrial copy number. Copy-number-dependent cellular fitness would
+require variable organelle counts coupled back into the population simulator.
+
+At a true cell division, each parental ecDNA copy retains itself and produces
+one additional copy with probability `replication_probability`. The joint pool
+is then divided between the two daughters by binomial segregation. Thus the
+daughters receive complementary, generally unequal copy numbers and can lose
+a species entirely. Induction-continuation nodes do not replicate or partition
+ecDNA. Recorder targets edit continuously according to the branch cell type's
+cycle length; static IDs and edited haplotypes follow ecDNA copies rather than
+all descendants of the cellular node.
+
+Run ecDNA alone or with the other modalities:
+
+```bash
+Rscript simulate_physicell_lineage.R \
+  --lineage divisions.csv \
+  --live-cells live_cells.csv \
+  --params parameters.json \
+  --modalities ecdna
+
+Rscript simulate_gillespie_lineage.R \
+  --params parameters.json \
+  --modalities all
+```
+
+Key outputs are:
+
+| File | Contents |
+| --- | --- |
+| `ecdna_species_manifest.csv.gz` | Species, labeling status, static IDs, and founder copy numbers. |
+| `ecdna_cell_summary.csv.gz` | Total/labeled copy number, retained species, and recorder burden per sampled cell. |
+| `ecdna_haplotypes.csv.gz` | Per-cell species/static-ID/CRISPR-haplotype copy counts. |
+| `ecdna_mutation_events.csv.gz` | Aggregated exact-time CRISPR edit occurrences with cellular branch provenance. |
+| `ecdna_static_id_copy_number_matrix_sparse.rds` | Cells by labeled static-ID copy number. |
+| `ecdna_recorder_edit_fraction_matrix_sparse.rds` | Cells by static-ID/target edited-copy fraction. |
+| `ecdna_recorder_character_matrix_sparse.rds` | Binary cell-by-static-ID/target character matrix. |
+
+The ecDNA character matrix is computed from actual terminal copy inheritance.
+It deliberately does not mark every cellular descendant of an edit-bearing
+branch, because random ecDNA segregation violates that Mendelian assumption.
+The covariate-linked scDesign3 loader also adds ecDNA copy number, labeled copy
+number, retained-species counts, and recorder edit fraction when these outputs
+are present.
 
 ## 5. JSON parameter file
 
@@ -316,9 +834,9 @@ base editing:
     "config": "S:<first_pos>:<bases_btwn>",   // S = spaced; R/U also accepted
     "interdeletion_dropout_radius": <int>,    // nuc only
     "interdeletion_dropout_prob": <float>,    // nuc only
-    "prime_editing_system": <bool>,           // nuc only
-    "num_unique_prime_editing_guides": <int>, // nuc only
-    "prime_editing_guide_length": <int>       // nuc only
+    "prime_editing_system": <bool>,           // nuc only; enables shared backend
+    "num_unique_prime_editing_guides": <int>, // legacy random-pool fallback
+    "prime_editing_guide_length": <int>       // legacy random-pool fallback
 }
 ```
 
@@ -329,6 +847,10 @@ expansion either propagates the same rate or *decays* it by 1–2 "degrees"
 `be_conversion_pattern` (e.g. `"A --> G"`) declares which base→base substitution
 the BE produces; `classify_be_mutation_type` then dispatches the BE rate into
 the transition or transversion probability list.
+
+Known prime-editing pools and target-specific efficiencies are configured in
+the top-level `prime_editing_backend` block described under
+“Unified prime-editing recorder.”
 
 ### 5.6 Induction events
 - `differentiation_induction.{timepoint, num_cells, frac_cells}` — when (and

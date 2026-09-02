@@ -1,0 +1,85 @@
+{
+  "sim_length": [3],
+  "mito_genome_length": 20,
+  "baseline_heteroplasmy_sites_frac": 0.1,
+  "baseline_heteroplasmy_variant_frac_dist": [1, 1],
+  "heteroplasmy_variant_transition_prob": 1,
+  "bc_length": 8,
+  "max_bc_ints_per_cell": [2],
+  "barcode_sequence": null,
+  "be_conversion_pattern": "A --> G",
+  "bc_nuc_composition": {
+    "frac_a": 0.25,
+    "frac_g": 0.25,
+    "frac_c": 0.25,
+    "frac_t": 0.25
+  },
+  "be_targets": {
+    "num_targets": 1,
+    "edit_rate_class_fractions": {
+      "high": 1,
+      "medium": 0,
+      "low": 0
+    },
+    "config": "S:2:0",
+    "editing_window": {
+      "size": 0,
+      "decaying": false,
+      "close_after_edit": true
+    }
+  },
+  "nuclease_targets": {
+    "num_targets": 1,
+    "edit_rate_class_fractions": {
+      "high": 1,
+      "medium": 0,
+      "low": 0
+    },
+    "config": "S:6:0",
+    "editing_window": {
+      "size": 0,
+      "decaying": false,
+      "close_after_edit": true
+    },
+    "prime_editing_system": false
+  },
+  "editing_induction": {
+    "timepoint": 0
+  },
+  "cell_type_dict": {
+    "founder_cell_type": "ct1",
+    "cell_type_params": {
+      "ct1": {
+        "cell_cycle_length": 1,
+        "bc_invariant_sites": 0,
+        "mt_invariant_sites": 0,
+        "uninduced_editing_params": {
+          "mt_substitution_model": "JC",
+          "mt_sub_model_params": [0],
+          "mt_bg_insertion_prob_per_division": 0,
+          "mt_bg_deletion_prob_per_division": 0,
+          "bc_substitution_model": "JC",
+          "bc_sub_model_params": [0],
+          "bc_bg_insertion_prob_per_division": 0,
+          "bc_bg_deletion_prob_per_division": 0,
+          "be_mutations_per_target_per_division": 0,
+          "nuc_insertions_per_target_per_division": 0,
+          "nuc_deletions_per_target_per_division": 0
+        },
+        "induced_editing_params": {
+          "mt_substitution_model": "JC",
+          "mt_sub_model_params": [0.1],
+          "mt_bg_insertion_prob_per_division": 0,
+          "mt_bg_deletion_prob_per_division": 0,
+          "bc_substitution_model": "JC",
+          "bc_sub_model_params": [0],
+          "bc_bg_insertion_prob_per_division": 0,
+          "bc_bg_deletion_prob_per_division": 0,
+          "be_mutations_per_target_per_division": 100,
+          "nuc_insertions_per_target_per_division": 0,
+          "nuc_deletions_per_target_per_division": 0
+        }
+      }
+    }
+  }
+}
