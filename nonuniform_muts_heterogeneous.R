@@ -1,3 +1,9 @@
+# Position-specific mutation engine for the legacy time-step simulator. Applies
+# background ("uniform") and target (High/Medium/Low class) transitions,
+# transversions, insertions, and deletions to sparse profiles whose rows are
+# genomes or barcode integrations and whose columns are sequence positions.
+# Sourced by sim5_code.R, which must already define the globals unique_run_id,
+# num_cols_mt, num_rows_bc, num_cols_bc, and the baseline_seq_ints_* vectors.
 # allow for heterogeneous rates within HMLB classes:
 suppressPackageStartupMessages({
   library(parallel)
@@ -12,6 +18,25 @@ suppressPackageStartupMessages({
 # and returns an updated position --> elig ints mapping that conforms to the restriction
 # that if ANY position in an editing window has already been edited, no further 
 # non-uniform mutations can occur at positions within this same editing window
+#' Restrict eligible integrations to editing windows that are still unedited
+#'
+#' Enforces the closed-window contract: once any position inside an editing
+#' window has been edited on a given integration, no further target mutation
+#' may occur at any position of that same window on that integration. A
+#' window's eligible set is the intersection of the unedited-integration sets
+#' of its positions, and a position's eligible set is the union over the
+#' windows it belongs to.
+#'
+#' @param pos_to_window_inds_list Named list keyed by target position; each
+#'   element holds the window identifier(s) that position belongs to.
+#' @param window_to_pos_inds_list Named list keyed by window identifier; each
+#'   element holds the positions that make up that window.
+#' @param pos_to_unedited_int_list Named list keyed by position (as character)
+#'   whose elements are the integration row indices still unedited at that
+#'   position. Positions missing from this list are skipped; a position that is
+#'   present with an empty vector closes its whole window.
+#' @return A list with the same names as `pos_to_window_inds_list`, each element
+#'   an integer vector of the integrations still eligible at that position.
 filter_elig_ints_by_edit_window <- function(pos_to_window_inds_list,
                                             window_to_pos_inds_list,
                                             pos_to_unedited_int_list){
@@ -46,6 +71,32 @@ filter_elig_ints_by_edit_window <- function(pos_to_window_inds_list,
 # returns c(i_coords, j_coords) which can be used to build new mutation matrix
 # this function only operates on High/Medium/Low bases; the background is encoded with uniform!
 # have to make sure we pass in the correct bg edit rate on non-uniform
+#' Sample target-position mutation coordinates from position-specific rates
+#'
+#' For each High/Medium/Low target position, draws a binomial count of edited
+#' integrations out of the ones still eligible there and then samples that many
+#' distinct integrations without replacement, so a position is never edited
+#' twice in one call. Background (non-target) positions are handled by
+#' `get_background_edit_inds()` instead. Duplicate coordinates are dropped, as
+#' are the sentinel entries recorded for positions that saw no edit.
+#'
+#' @param pos_er_list Named list keyed by target position (as character) whose
+#'   values are the per-timestep edit probabilities; values above one are capped
+#'   at one.
+#' @param num_integrations Accepted for call-site compatibility; unused.
+#' @param eligible_ints Named list keyed by position (as character) giving the
+#'   integration row indices that may still be edited there. A position whose
+#'   eligible set is empty is saturated and contributes no edit.
+#' @param timepoint_savename Accepted for call-site compatibility; unused.
+#' @param length1_positions Accepted for call-site compatibility; unused.
+#' @return A named list with `i_coords` (edited integration row indices) and
+#'   `j_coords` (their integer sequence positions), or both entries set to
+#'   `FALSE` when no position was edited.
+#' @section Side effects: When `eligible_ints` is `NULL` a diagnostic line is
+#'   appended to the run log under `output/run_logs/<unique_run_id>/` (global
+#'   `unique_run_id`) and no coordinates are produced. If more than one
+#'   integration is somehow drawn where only one is eligible, the same log is
+#'   written and the session terminates with `quit(status = 1)`.
 non_uniform_editing <- function(pos_er_list, num_integrations, eligible_ints, timepoint_savename = '', length1_positions = NULL){
   
   
@@ -152,6 +203,36 @@ non_uniform_editing <- function(pos_er_list, num_integrations, eligible_ints, ti
 
 
 
+#' Sample background (non-target) mutation coordinates across a whole profile
+#'
+#' Draws one binomial count per column at that column's background probability
+#' and then samples that many distinct rows without replacement. This is
+#' equivalent to an independent Bernoulli draw per matrix cell but cannot
+#' produce duplicate coordinates. In transversion mode each position first
+#' picks one of its two possible destination bases in proportion to their
+#' rates, and that choice is reported back to the caller.
+#'
+#' @param num_rows Number of profile rows (genomes or barcode integrations).
+#' @param num_cols Number of sequence positions; `bg_pos_er_list` must supply
+#'   exactly this many probabilities.
+#' @param bg_pos_er_list Per-position background edit probabilities, one entry
+#'   per column. With `sample_transversion = TRUE` each entry instead holds the
+#'   two destination-base probabilities, named by destination nucleotide.
+#' @param mut_type Mutation-type label used only in the verbose log line.
+#' @param sample_transversion Whether to choose one destination base per
+#'   position before sampling. A position whose rates are all zero picks the
+#'   first option arbitrarily, since no mutation follows downstream.
+#' @param verbose Whether to log the number of sampled edits.
+#' @return A named list with `num_edits`, `i_coords` (rows), and `j_coords`
+#'   (columns); coordinates are empty when `num_edits` is zero. With
+#'   `sample_transversion = TRUE` and at least one edit the list also carries
+#'   `selected_bases_to`, the per-position destination base coded `1`-`4` for
+#'   `A, G, C, T`.
+#' @section Side effects: With `verbose = TRUE`, appends the edit count to the
+#'   run log under `output/run_logs/<unique_run_id>/`, using the global
+#'   `unique_run_id`.
+#' @note Stops when the probability vector is not one value per column, or when
+#'   any value is non-finite or outside `[0, 1]`.
 get_background_edit_inds <- function(num_rows, num_cols, bg_pos_er_list, mut_type,
                                      sample_transversion = FALSE, verbose = FALSE){
   # Accepts sparse matrix as input, and adds to it the transitions that occur
@@ -245,6 +326,41 @@ get_background_edit_inds <- function(num_rows, num_cols, bg_pos_er_list, mut_typ
 
 
 
+#' Apply background and target transitions to a mutation profile
+#'
+#' Runs the background pass over every position first, then, when a target rate
+#' list is supplied, a non-uniform pass restricted to the integrations that are
+#' still reference (`0`) at each target position and, optionally, to editing
+#' windows that no edit has closed yet. Transitions swap `A<->G` and `C<->T`
+#' under the `1, 2, 3, 4` encoding of `A, G, C, T`. Only base-editor rates are
+#' accepted here because nuclease editing is not expected to raise transition
+#' rates.
+#'
+#' @param mut_mat Sparse mutation profile (rows = genomes or integrations,
+#'   columns = sequence positions) to update.
+#' @param num_rows Number of profile rows.
+#' @param num_cols Number of sequence positions.
+#' @param baseline_ints Integer-encoded reference sequence, one base code per
+#'   column, used to resolve the outcome at still-reference positions.
+#' @param bg_transition_pos_er_list Per-position background transition
+#'   probabilities, one per column.
+#' @param target_transition_pos_er_list Named list keyed by target position of
+#'   elevated transition probabilities. `NULL` or an empty list means the
+#'   background pass is the whole model.
+#' @param timepoint_filename Label forwarded to `non_uniform_editing()`.
+#' @param verbose Whether to emit progress lines to the run log.
+#' @param target_to_window_ind_list Position-to-editing-window map, required
+#'   when `close_window` is `TRUE`.
+#' @param window_to_target_ind_list Editing-window-to-position map, required
+#'   when `close_window` is `TRUE`.
+#' @param close_window Whether an edit anywhere in an editing window blocks
+#'   further target transitions elsewhere in that same window.
+#' @return The updated sparse mutation profile.
+#' @section Side effects: Assigns an empty list to the global `elig_ints_list`
+#'   before building the eligible-integration map locally. With
+#'   `verbose = TRUE`, appends progress lines to the run log under
+#'   `output/run_logs/<unique_run_id>/` and to `no_strings.txt` in the working
+#'   directory.
 transition_func <- function(mut_mat, num_rows, num_cols, baseline_ints, 
                             bg_transition_pos_er_list,
                             target_transition_pos_er_list = NULL,
@@ -257,6 +373,21 @@ transition_func <- function(mut_mat, num_rows, num_cols, baseline_ints,
   
   transition_matches <- c(2,1,4,3)
   
+  #' Internal: turn sampled coordinates into transition deltas
+  #'
+  #' Resolves each sampled coordinate against the value already stored there: a
+  #' reference position (`0`) transitions the baseline base, an insertion
+  #' (non-integer value) transitions one randomly chosen inserted base in place,
+  #' a deletion (`-1`) contributes nothing, and an existing substitution
+  #' transitions its current base.
+  #'
+  #' @param i_coords Row indices of the coordinates to mutate.
+  #' @param j_coords Sequence positions matching `i_coords`.
+  #' @param incoming_mat Profile the deltas are added to.
+  #' @param match_transition_bases Length-4 lookup carrying each base code to
+  #'   its transition partner.
+  #' @return `incoming_mat` plus a sparse matrix of the deltas that move each
+  #'   sampled coordinate to its transitioned encoding.
   post_indices_transition_func <- function(i_coords, j_coords, incoming_mat, match_transition_bases){
     
     
@@ -432,6 +563,46 @@ transition_func <- function(mut_mat, num_rows, num_cols, baseline_ints,
 # the only difference would be in an editing window context, where bases can differ. 
 # i’d argue it’s actually better to NOT force transversions in these cases.
 
+#' Apply background and target transversions to a mutation profile
+#'
+#' Runs the background pass first, where `get_background_edit_inds()` picks one
+#' of the two possible destination bases per position, then, when a target rate
+#' list is supplied, a non-uniform pass over the integrations still reference
+#' (`0`) at each target position and optionally restricted to editing windows
+#' that no edit has closed. Transversions carry `A`/`G` to `C`/`T` and back
+#' under the `1, 2, 3, 4` encoding of `A, G, C, T`; unforced destinations are
+#' drawn in proportion to the substitution matrix, while forced target
+#' transversions use `target_transversion_to_base` when given and otherwise the
+#' fixed pairing `A->C, G->T, C->A, T->G`.
+#'
+#' @param mut_mat Sparse mutation profile to update.
+#' @param num_rows Number of profile rows.
+#' @param num_cols Number of sequence positions.
+#' @param bg_transversion_pos_er_list Per-position background rates; each entry
+#'   holds the two destination-base probabilities, named by destination base.
+#' @param baseline_ints Integer-encoded reference sequence, one base code per
+#'   column.
+#' @param bg_sub_prob_mat Substitution-probability matrix indexed `1`-`4` in
+#'   `A, G, C, T` order, used to weight the destination base.
+#' @param target_transversion_pos_er_list Named list keyed by target position of
+#'   elevated transversion probabilities. `NULL` or an empty list means the
+#'   background pass is the whole model.
+#' @param force_target_transversions Whether target positions must transverse to
+#'   a deterministic destination base rather than a weighted draw.
+#' @param verbose Whether background sampling logs its edit count.
+#' @param target_transversion_to_base Destination base code applied to every
+#'   forced target transversion; `NULL` falls back to the fixed pairing.
+#' @param target_to_window_ind_list Position-to-editing-window map, required
+#'   when `close_window` is `TRUE`.
+#' @param window_to_target_ind_list Editing-window-to-position map, required
+#'   when `close_window` is `TRUE`.
+#' @param close_window Whether an edit anywhere in an editing window blocks
+#'   further target transversions elsewhere in that same window.
+#' @return The updated sparse mutation profile.
+#' @section Side effects: Assigns an empty list to the global `elig_ints_list`
+#'   before building the eligible-integration map locally.
+#' @note Forcing applies only to the target pass; background destinations are
+#'   always drawn from the position's two sampled options.
 transversion_func <- function(mut_mat, num_rows, num_cols, bg_transversion_pos_er_list, baseline_ints, bg_sub_prob_mat,
                               target_transversion_pos_er_list = NULL, force_target_transversions = FALSE, verbose = FALSE,
                               target_transversion_to_base = NULL,
@@ -446,6 +617,23 @@ transversion_func <- function(mut_mat, num_rows, num_cols, bg_transversion_pos_e
   transversion_matches <- list(c(3,4), c(3,4), c(1,2), c(1,2))
   forced_transversion_matches <- list(3, 4, 1, 2)
   
+  #' Internal: turn sampled coordinates into transversion deltas
+  #'
+  #' Mirrors the transition version: a reference position (`0`) takes the
+  #' destination base supplied for its column, an insertion transverses one
+  #' randomly chosen inserted base with the destination drawn from
+  #' `bg_sub_prob_mat`, a deletion (`-1`) contributes nothing, and a position
+  #' already carrying a substitution is re-mutated using the `bases_going_to`
+  #' entry looked up by its current base code.
+  #'
+  #' @param i_coords Row indices of the coordinates to mutate.
+  #' @param j_coords Sequence positions matching `i_coords`.
+  #' @param incoming_mat Profile the deltas are added to.
+  #' @param bases_going_to Per-column destination base codes (`1`-`4`).
+  #' @param force_transversions Flag recorded by the caller; the destination is
+  #'   already resolved in `bases_going_to`, so this argument is unused here.
+  #' @return `incoming_mat` plus a sparse matrix of the deltas that move each
+  #'   sampled coordinate to its transversed encoding.
   post_indices_transversion_func <- function(i_coords, j_coords, incoming_mat, bases_going_to, force_transversions){
     
     # the new version of this expression closely parallels the transition one
@@ -619,6 +807,43 @@ transversion_func <- function(mut_mat, num_rows, num_cols, bg_transversion_pos_e
  
 
 
+#' Apply background and target insertions to a mutation profile
+#'
+#' Runs the background pass over every position first and then, when a target
+#' rate list is supplied, a non-uniform pass over the integrations still
+#' reference (`0`) at each target position, optionally restricted to editing
+#' windows that no edit has closed. Ordinary insertions draw a length from a
+#' `rgamma(shape = 1, rate = 1)` draw rounded up and append that many random
+#' bases as the decimal part of the encoded value; an insertion sampled where
+#' one already exists is spliced into it by `ins_in_ins()`. Under prime editing
+#' the target pass instead writes the programmed template for that position.
+#' Background insertions never use prime editing.
+#'
+#' @param mut_mat Sparse mutation profile to update.
+#' @param num_rows Number of profile rows.
+#' @param num_cols Number of sequence positions.
+#' @param bg_ins_pos_er_list Per-position background insertion probabilities,
+#'   one per column.
+#' @param target_ins_pos_er_list Named list keyed by target position of elevated
+#'   insertion probabilities. `NULL` or an empty list means the background pass
+#'   is the whole model.
+#' @param run_id Accepted for call-site compatibility; unused.
+#' @param this_cell_num Accepted for call-site compatibility; unused.
+#' @param verbose Whether background sampling logs its edit count.
+#' @param prime_editing Whether target insertions write programmed templates
+#'   rather than random bases.
+#' @param ind_to_prime_seq_int_map Named list keyed by position (as character)
+#'   whose values are the integer-encoded inserted template for that position;
+#'   required when `prime_editing` is `TRUE`.
+#' @param target_to_window_ind_list Position-to-editing-window map, required
+#'   when `close_window` is `TRUE`.
+#' @param window_to_target_ind_list Editing-window-to-position map, required
+#'   when `close_window` is `TRUE`.
+#' @param close_window Whether an edit anywhere in an editing window blocks
+#'   further target insertions elsewhere in that same window.
+#' @return The updated sparse mutation profile.
+#' @section Side effects: Assigns an empty list to the global `elig_ints_list`
+#'   before building the eligible-integration map locally.
 insertion_func <- function(mut_mat, num_rows, num_cols, bg_ins_pos_er_list,
                            target_ins_pos_er_list = NULL,
                            run_id = NULL,
@@ -634,6 +859,20 @@ insertion_func <- function(mut_mat, num_rows, num_cols, bg_ins_pos_er_list,
   # we accept both the BE pos er list AND nuc pos er list in insertions because there may be elevated substitution rates at cut sites
   
   # function for generating necessary mutation values to do insertions within insertions:
+  #' Internal: encode an insertion placed inside an existing insertion
+  #'
+  #' Rebuilds the encoded value that splits the current insertion at `ins_pos`,
+  #' splices in `new_ins_length` freshly sampled bases, and shifts the trailing
+  #' bases right, then returns the difference from the current value because
+  #' callers add their result to the profile. The sign of the current value (a
+  #' deleted reference base is encoded as `-1.<digits>`) is preserved.
+  #'
+  #' @param ins_pos Digit offset within the current insertion at which the new
+  #'   bases are spliced in.
+  #' @param current_ins Existing encoded insertion value at that coordinate.
+  #' @param new_ins_length Number of bases in the new insertion.
+  #' @return The numeric delta that, added to `current_ins`, yields the
+  #'   insertion-in-insertion encoding.
   ins_in_ins <- function(ins_pos, current_ins, new_ins_length){
     
     # we can work backwards, knowing what the insertion-in-insertion should look like by the end,
@@ -687,6 +926,17 @@ insertion_func <- function(mut_mat, num_rows, num_cols, bg_ins_pos_er_list,
   
   # Accepts sparse matrix as input, and adds to it the insertions that occur
   
+  #' Internal: turn sampled coordinates into insertion values
+  #'
+  #' @param i_coords Row indices of the coordinates to mutate.
+  #' @param j_coords Sequence positions matching `i_coords`.
+  #' @param incoming_mat Profile the new values are added to.
+  #' @param elig_ints Accepted for call-site compatibility; unused.
+  #' @param prime_editing Whether to write the programmed template for each
+  #'   position instead of sampling random bases and lengths.
+  #' @param ind_to_prime_seq_int_map Position-keyed programmed templates used
+  #'   when `prime_editing` is `TRUE`.
+  #' @return `incoming_mat` plus a sparse matrix of the encoded insertions.
   post_indices_insertion_func <- function(i_coords, j_coords, incoming_mat, elig_ints = NULL,
                                           prime_editing = prime_editing,
                                           ind_to_prime_seq_int_map = ind_to_prime_seq_int_map){
@@ -810,6 +1060,17 @@ insertion_func <- function(mut_mat, num_rows, num_cols, bg_ins_pos_er_list,
 
 
 
+#' Count the bases still deletable at one encoded position
+#'
+#' A non-negative value with a decimal part carries an insertion plus its
+#' intact reference base, so every inserted digit and the reference base can
+#' still be deleted; a plain non-negative value is one intact base. A negative
+#' value means the reference base is already deleted, leaving only the inserted
+#' digits, and a bare `-1` leaves nothing.
+#'
+#' @param x One encoded mutation-matrix value.
+#' @return The integer number of reference or inserted bases that can still be
+#'   deleted at that position.
 num_deletable_bases <- function(x){
   
   post <- x %% 1
@@ -834,6 +1095,20 @@ num_deletable_bases <- function(x){
 
 
 
+#' Delete a run of bases starting at one coordinate, extending leftward
+#'
+#' Consumes as many bases as the starting position still has: a partial
+#' deletion trims trailing inserted bases, an exact match sets the position to
+#' `-1`, and a longer deletion sets the position to `-1` and recurses one
+#' column to the left with the remaining length. Recursion stops at the profile
+#' boundary, so a deletion running off either end is silently truncated.
+#'
+#' @param ival Row index of the profile being edited.
+#' @param jval Sequence position where the deletion starts.
+#' @param del_length Number of bases still to delete.
+#' @param mat_name Mutation profile to modify.
+#' @param num_cols Number of sequence positions, used as the right boundary.
+#' @return The modified mutation profile.
 perform_deletion <- function(ival, jval, del_length, mat_name, num_cols){
   
   # if the deletion has taken us out of bounds
@@ -858,6 +1133,17 @@ perform_deletion <- function(ival, jval, del_length, mat_name, num_cols){
   
 }
 
+#' Apply a batch of deletions to one profile in sequence
+#'
+#' Deletions are applied one after another, so a later deletion sees the
+#' profile left behind by the earlier ones.
+#'
+#' @param i Row indices of the deletion start coordinates.
+#' @param j Sequence positions of the deletion start coordinates.
+#' @param d Deletion lengths, parallel to `i` and `j`.
+#' @param old_mat Mutation profile to modify.
+#' @param num_cols Number of sequence positions.
+#' @return The mutation profile with every requested deletion applied.
 all_deletions_one_mat <- function(i, j, d, old_mat, num_cols){
   
   for(elem_num in seq_along(i)){
@@ -868,6 +1154,42 @@ all_deletions_one_mat <- function(i, j, d, old_mat, num_cols){
   
 }
 
+#' Apply background and target deletions to a mutation profile
+#'
+#' Runs the background pass over every position first and then, when a target
+#' rate list is supplied, a non-uniform pass over the integrations still
+#' reference (`0`) at each target position, optionally restricted to editing
+#' windows that no edit has closed. Each sampled coordinate starts a deletion
+#' whose length comes from a `rgamma(shape = 1, rate = 1)` draw rounded up and
+#' which extends leftward when the starting position runs out of bases. After
+#' each pass, deletions made in the same call and close enough together may
+#' drop the sequence lying between them.
+#'
+#' @param mut_mat Sparse mutation profile to update.
+#' @param num_rows Number of profile rows.
+#' @param num_cols Number of sequence positions.
+#' @param bg_del_pos_er_list Per-position background deletion probabilities, one
+#'   per column.
+#' @param uniform Accepted for call-site compatibility; unused. Whether the
+#'   non-uniform pass runs is decided by `target_del_pos_er_list`.
+#' @param target_del_pos_er_list Named list keyed by target position of elevated
+#'   deletion probabilities. `NULL` or an empty list means the background pass
+#'   is the whole model.
+#' @param verbose Whether background sampling logs its edit count.
+#' @param interdeletion_dropout_prob Probability that the sequence between two
+#'   nearby simultaneous deletions is lost; dropout is skipped at zero.
+#' @param interdeletion_dropout_radius Maximum distance in positions between two
+#'   simultaneous deletions for the intervening sequence to be at risk; dropout
+#'   is skipped at zero.
+#' @param target_to_window_ind_list Position-to-editing-window map, required
+#'   when `close_window` is `TRUE`.
+#' @param window_to_target_ind_list Editing-window-to-position map, required
+#'   when `close_window` is `TRUE`.
+#' @param close_window Whether an edit anywhere in an editing window blocks
+#'   further target deletions elsewhere in that same window.
+#' @return The updated sparse mutation profile.
+#' @section Side effects: Assigns an empty list to the global `elig_ints_list`
+#'   before building the eligible-integration map locally.
 deletion_func <- function(mut_mat, num_rows, num_cols, bg_del_pos_er_list, uniform = TRUE,
                           target_del_pos_er_list = NULL, verbose = FALSE, interdeletion_dropout_prob = 0,
                           interdeletion_dropout_radius = 0,
@@ -878,8 +1200,30 @@ deletion_func <- function(mut_mat, num_rows, num_cols, bg_del_pos_er_list, unifo
   # we accept both the BE pos er list AND nuc pos er list in deletions because there may be elevated substitution rates at cut sites
 
   # Accepts sparse matrix as input, and adds to it the deletions that occur
+  #' Internal: drop the sequence between nearby simultaneous deletions
+  #'
+  #' For every integration, pairs the deletions made in this call that lie
+  #' within `deletion_radius` of one another and, with probability
+  #' `dropout_prob` per pair, sets the whole span between the two positions to
+  #' `-1`.
+  #'
+  #' @param deletion_mut_mat Two-column matrix of the integration row and
+  #'   sequence position of each deletion made in this call.
+  #' @param deletion_radius Maximum distance in positions between two deletions
+  #'   for the intervening sequence to be at risk.
+  #' @param dropout_prob Per-pair probability that the intervening sequence is
+  #'   deleted.
+  #' @param bc_profile Barcode profile to modify.
+  #' @return `bc_profile` with the dropped-out spans set to `-1`.
   multi_edit_bc_dropout <- function(deletion_mut_mat, deletion_radius, dropout_prob, bc_profile){
     
+    #' Internal: list deletion pairs close enough to allow dropout
+    #'
+    #' @param delmat Two-column matrix of one integration's deletion
+    #'   coordinates; the second column holds the sequence positions.
+    #' @param radius Maximum allowed distance between the two positions.
+    #' @return A two-column matrix of position pairs, with zero rows when the
+    #'   integration carries fewer than two deletions.
     find_deletions_within_radius <- function(delmat, radius) {
       deletion_positions <- delmat[, 2]
       if(length(deletion_positions) < 2){ # no inter-target dropout if fewer than 2 deletions
@@ -946,6 +1290,13 @@ deletion_func <- function(mut_mat, num_rows, num_cols, bg_del_pos_er_list, unifo
   }
 
   
+  #' Internal: draw deletion lengths and apply them to the profile
+  #'
+  #' @param i_coords Row indices of the deletion start coordinates.
+  #' @param j_coords Sequence positions of the deletion start coordinates.
+  #' @param incoming_mat Mutation profile to modify.
+  #' @return The profile after every sampled deletion has been applied, with
+  #'   lengths drawn from `rgamma(shape = 1, rate = 1)` and rounded up.
   post_indices_deletion_func <- function(i_coords, j_coords, incoming_mat){
 
 
@@ -1041,6 +1392,25 @@ deletion_func <- function(mut_mat, num_rows, num_cols, bg_del_pos_er_list, unifo
 }
 
 
+#' Apply one timestep of mitochondrial mutation to a genome profile
+#'
+#' Applies transitions, transversions, insertions, and deletions in that order,
+#' each pass seeing the profile left by the previous one. Mitochondrial genomes
+#' have no target positions, so only background rates are supplied and no
+#' editing windows, prime editing, or inter-deletion dropout apply.
+#'
+#' @param incoming_mut_mat Sparse profile whose rows are mitochondrial genomes
+#'   and whose columns are genome positions; the row count is taken from it.
+#' @param bg_transition_list Per-position background transition probabilities.
+#' @param bg_transversion_list Per-position background transversion
+#'   probabilities, each entry holding the two destination-base probabilities.
+#' @param bg_insertion_list Per-position background insertion probabilities.
+#' @param bg_deletion_list Per-position background deletion probabilities.
+#' @param prob_sub_mat Substitution-probability matrix indexed `1`-`4` in
+#'   `A, G, C, T` order.
+#' @return The mutated mitochondrial profile.
+#' @note Reads the globals `num_cols_mt` and `baseline_seq_ints_mt` from the
+#'   calling environment, which `sim5_code.R` defines and exports to workers.
 perform_all_mt_mutations <- function(incoming_mut_mat,
                                      bg_transition_list,
                                      bg_transversion_list,
@@ -1092,6 +1462,56 @@ perform_all_mt_mutations <- function(incoming_mut_mat,
   
 }
 
+#' Apply one timestep of barcode mutation to an integration profile
+#'
+#' Applies transitions, transversions, insertions, and deletions in that order,
+#' each pass seeing the profile left by the previous one. Every pass combines
+#' the background rates with the elevated target rates for the current cell
+#' type and editing state, and the base-editor windows govern the substitution
+#' passes while the nuclease windows govern the indel passes.
+#'
+#' @param incoming_mut_mat Sparse profile whose rows are barcode integrations
+#'   and whose columns are barcode positions.
+#' @param bg_transition_list Per-position background transition probabilities.
+#' @param bg_transversion_list Per-position background transversion
+#'   probabilities, each entry holding the two destination-base probabilities.
+#' @param bg_insertion_list Per-position background insertion probabilities.
+#' @param bg_deletion_list Per-position background deletion probabilities.
+#' @param target_transition_list Position-keyed target transition rates.
+#' @param target_transversion_list Position-keyed target transversion rates.
+#' @param target_insertion_list Position-keyed target insertion rates.
+#' @param target_deletion_list Position-keyed target deletion rates.
+#' @param prob_sub_mat Substitution-probability matrix indexed `1`-`4` in
+#'   `A, G, C, T` order.
+#' @param timepoint_for_label Timepoint label forwarded to the transition pass.
+#' @param urid Run identifier forwarded to the insertion pass.
+#' @param cell_num Cell identifier forwarded to the insertion pass.
+#' @param interdel_dropout_radius Maximum distance between two simultaneous
+#'   deletions for the intervening sequence to be at risk.
+#' @param interdel_dropout_prob Probability that such an intervening span is
+#'   lost.
+#' @param prime_editing_system Whether target insertions write programmed
+#'   pegRNA templates.
+#' @param ind_to_prime_seq_int_map Position-keyed programmed insertion
+#'   templates used under prime editing.
+#' @param force_target_transversions Whether target transversions use a
+#'   deterministic destination base.
+#' @param target_transversion_to_base Destination base code for forced target
+#'   transversions.
+#' @param close_nuc_window_after_edit Whether an edit closes its nuclease
+#'   editing window for insertions and deletions.
+#' @param close_transition_window_after_edit Whether an edit closes its
+#'   base-editor window for transitions.
+#' @param close_transversion_window_after_edit Whether an edit closes its
+#'   base-editor window for transversions.
+#' @param be_target_to_window_ind_list Base-editor position-to-window map.
+#' @param nuc_target_to_window_ind_list Nuclease position-to-window map.
+#' @param be_window_to_target_ind_list Base-editor window-to-position map.
+#' @param nuc_window_to_target_ind_list Nuclease window-to-position map.
+#' @return The mutated barcode profile.
+#' @note Reads the globals `num_rows_bc`, `num_cols_bc`, and
+#'   `baseline_seq_ints_bc` from the calling environment, which `sim5_code.R`
+#'   defines and exports to workers.
 perform_all_bc_mutations <- function(incoming_mut_mat, 
                                      bg_transition_list,
                                      bg_transversion_list,

@@ -1,3 +1,28 @@
+# Turn per-cell mutation matrices ("profiles") into score matrices for
+# phylogenetic reconstruction, and write them out as RDS, FASTA and PHYLIP.
+# Rows of a score matrix are cells keyed by lineage string; columns are unique
+# mutation events (position and mutation value, plus integration for barcodes).
+# Sourced by sim5_code.R after data.table, Matrix and dplyr are attached;
+# get_norm_cell_heteroplasmy_scores() additionally needs draw_severity_scores().
+
+#' Collapse runs of consecutive deleted positions into one row each
+#'
+#' Sorts the deletion events by lineage string, integration and position, then
+#' walks them once and closes a run whenever the next event belongs to another
+#' cell or integration or does not sit at the following position. Each run is
+#' reported once, at its last position, with the run length as its mutation
+#' value.
+#'
+#' @param deletion_df Data frame of deletion events with columns `linstring`,
+#'   `ints_mutated`, `positions_mutated` and a mutation-value column; only
+#'   deletion rows (mutation value `-1`) are expected. Need not be sorted.
+#' @return A character matrix carrying the column names of `deletion_df`, one
+#'   row per contiguous run: lineage string, integration, the last position of
+#'   the run, and `d<run length>` in place of the mutation value. A zero-row
+#'   character matrix with the same column names when `deletion_df` is empty.
+#' @note Run continuation is tested with `positions_mutated[i + 1] ==
+#'   positions_mutated[i] + 1`, so the position column must be numeric; a
+#'   character position column errors on that arithmetic.
 group_deletions <- function(deletion_df){
   if(nrow(deletion_df) == 0){
     return(matrix(character(), nrow = 0, ncol = ncol(deletion_df),
@@ -42,6 +67,22 @@ group_deletions <- function(deletion_df){
   grouped
 }
 
+#' Write a score matrix as sequential PHYLIP
+#'
+#' Emits a `<taxa> <characters>` header line followed by one line per row: the
+#' row name, a single space, and the row's scores concatenated with no
+#' separator.
+#'
+#' @param score_mat Matrix whose rows are taxa (cells, named by `rownames`) and
+#'   whose columns are characters (unique mutations). Each score is pasted as
+#'   printed, so one score occupies one column of the alignment only when every
+#'   score is a single digit.
+#' @param output_phylip_path Path of the file to write.
+#' @return `NULL`; called for its side effect.
+#' @section Side effects: Creates or overwrites `output_phylip_path`.
+#' @note Taxon names are separated from the data by one space and are not
+#'   padded to the ten-character field of strict PHYLIP, so the output is the
+#'   relaxed sequential form.
 score_mat_to_phylip <- function(score_mat, output_phylip_path) {
   num_taxa <- nrow(score_mat)
   num_chars <- ncol(score_mat)
@@ -58,6 +99,23 @@ score_mat_to_phylip <- function(score_mat, output_phylip_path) {
   close(phylip_f)
 }
 
+#' Write a score matrix as a character-state FASTA
+#'
+#' One record per row: `>` plus the row name, then the row's states with no
+#' separator. A state is `as.integer()` of the score (truncated toward zero),
+#' or `?` where the score is `NA`, which is how an integration a cell never
+#' recovered is represented.
+#'
+#' @param scoremat Matrix (dense or sparse) whose rows are cells named by
+#'   `rownames` and whose columns are unique mutations. Intended for 0/1 or
+#'   `NA` scores.
+#' @param output_fasta_path Path of the FASTA to write.
+#' @return `NULL`; called for its side effect.
+#' @section Side effects: Creates or overwrites `output_fasta_path`.
+#' @note Because states go through `as.integer()`, an un-binarized allelic
+#'   fraction in (0, 1) is written as `0` and a raw count of 10 or more takes
+#'   more than one character, which shifts the rest of that record. Binarized
+#'   or otherwise 0/1 matrices are the intended input.
 new_scoremat_to_fasta <- function(scoremat, output_fasta_path){
   seq_vec <- apply(scoremat, 1, function(x){
     
@@ -71,6 +129,70 @@ new_scoremat_to_fasta <- function(scoremat, output_fasta_path){
       sep = '\n')
 }
 
+#' Build the score matrix for one set of cell profiles
+#'
+#' Gathers every non-zero entry of every cell's mutation matrix into a
+#' cell-by-mutation sparse matrix. One column is one unique mutation event: for
+#' `'bc'` the integration, position and mutation value together; for `'mt'` the
+#' position and mutation value only, so the same variant on several genomes of
+#' a cell is one character scored by its allelic fraction. Reference bases
+#' (`0`) never get a column, so a cell that lacks a mutation simply scores 0 in
+#' that column.
+#'
+#' @details Column names are `<mt|bc>_<mutation name>`, that is
+#'   `bc_<integration>_<position>_<mutation value>` or
+#'   `mt_<position>_<mutation value>`, where the mutation value is the profile
+#'   value itself: `-1` for a deletion, `1`-`4` for a substitution to A/G/C/T,
+#'   and the decimal insertion code for an insertion, so two different
+#'   insertions at one position are two different characters. A condensed
+#'   deletion run replaces the single position with `<first>_<last>` and keeps
+#'   the value `-1`. Scores are the number of recovered integrations carrying
+#'   the mutation for `'bc'`, and that count divided by the number of genomes
+#'   recovered for the cell (0 when none were) for `'mt'`.
+#'
+#' @param profiles Named list of mutation matrices, one per cell, named by
+#'   lineage string. Rows are the recovered integrations or mitochondrial
+#'   genomes, in the same order as `recovered_ints[[cell]]`; columns are
+#'   sequence positions.
+#' @param condense Logical. `TRUE` collapses deletions at consecutive positions
+#'   on one integration into a single column; `FALSE` keeps one column per
+#'   deleted position.
+#' @param urid Character run id naming the `output/score_mats/<urid>` tree.
+#' @param savename_prefix Character. Base file name of the written artifacts.
+#' @param mt_or_bc Character, `'mt'` or `'bc'`. Decides whether the integration
+#'   is part of a mutation's identity and whether scores are allelic fractions
+#'   or raw counts.
+#' @param recovered_ints Named list, one integer vector per cell, of the
+#'   integration or genome indices backing the rows of `profiles[[cell]]`.
+#'   Their lengths are the denominators of the `'mt'` allelic fractions.
+#' @param binarize_score Logical vector. `'mt'` only: one artifact per element,
+#'   with every non-zero score set to 1 when the element is `TRUE`.
+#' @param allelic_fraction_thresh Numeric vector in [0, 1]. `'mt'` only: one
+#'   artifact per element, with scores below that threshold set to 0.
+#' @param return_af_fracs Logical. `TRUE` returns the per-cell scores instead
+#'   of writing any file.
+#' @return In count mode (`return_af_fracs = TRUE`) a list ordered like
+#'   `profiles`: a cell carrying mutations maps to a list of named scores
+#'   covering only the mutations it carries, while a cell carrying none maps to
+#'   a named numeric vector of zeros over every mutation name. In output mode,
+#'   `NULL` after the artifacts are written. In either mode, if no cell carries
+#'   a single mutation the return is instead a `length(profiles)` x 1 all-zero
+#'   sparse matrix whose one column is named `control` and whose rownames are
+#'   the lineage strings, so a caller in count mode has to check that it got a
+#'   list back.
+#' @section Side effects: Creates `output/score_mats/<urid>/matrices/af` and
+#'   `output/score_mats/<urid>/phylips/af`, then writes
+#'   `matrices/<savename_prefix><suffix>.rds` (the sparse matrix with row and
+#'   column names attached) plus the matching
+#'   `phylips/<savename_prefix><suffix>.fasta`. The suffix is empty for `'bc'`
+#'   and `_AF_<threshold>_B_<T|F>` for each threshold/binarize pair for `'mt'`;
+#'   both are written directly under `matrices/` and `phylips/`, leaving the
+#'   `af/` subdirectories empty.
+#' @note With `condense = TRUE` and at least one deletion present, the deletion
+#'   branch calls `releid()`, which is defined neither here nor in data.table,
+#'   so that combination errors.
+#' @note Barcode scores are not masked: a mutation on an integration the cell
+#'   never recovered scores 0 rather than `NA`, unlike `create_one_score_mat()`.
 new_create_one_score_mat <- function(profiles,
                                      condense,
                                      urid,
@@ -216,6 +338,15 @@ new_create_one_score_mat <- function(profiles,
     
   }
   
+  #' Internal: label one score matrix and write its RDS and FASTA
+  #'
+  #' @param mat Sparse score matrix with rows in `names(profiles)` order and
+  #'   columns in `unique_pos_muts` order.
+  #' @param suffix Character appended to `savename_prefix` in both file names.
+  #' @return `NULL`. Attaches `<mt_or_bc>_<mutation name>` colnames and
+  #'   lineage-string rownames to `mat`, saves it to
+  #'   `output/score_mats/<urid>/matrices/<savename_prefix><suffix>.rds` and
+  #'   writes the character-state FASTA alongside it in `phylips/`.
   write_mat <- function(mat, suffix = ''){
 
     colnames(mat) <- paste(mt_or_bc, unique_pos_muts$mut_name, sep = '_')
@@ -251,6 +382,53 @@ new_create_one_score_mat <- function(profiles,
 }
 
 # additional functionality to facilitate heteroplasmy calculations:
+#' Build the score matrix for one set of cell profiles (legacy version)
+#'
+#' Takes the same arguments as `new_create_one_score_mat()` and produces the
+#' same mutation naming and the same `output/score_mats/<urid>` layout, but is
+#' built on base matrices and dplyr instead of data.table, and differs in what
+#' it writes for barcodes and in where un-binarized mitochondrial artifacts
+#' land.
+#'
+#' @details Barcode output is densified and binarized -- every non-zero score
+#'   becomes 1 -- and then masked: for each cell, every column whose
+#'   integration is absent from `recovered_ints[[cell]]` is set to `NA` so that
+#'   an unrecovered integration is written as `?` rather than scored as
+#'   reference. It is saved as `matrices/<savename_prefix>.rds` with its FASTA
+#'   in `phylips/`. Mitochondrial output loops over thresholds and binarize
+#'   flags as in the new version, but only the binarized matrices go to
+#'   `matrices/` and `phylips/`; un-binarized ones go to the `matrices/af/` and
+#'   `phylips/af/` subdirectories. Condensed deletion runs are named by
+#'   `group_deletions()`, so a run appears at its last position with the
+#'   mutation value `d<run length>` rather than `-1`.
+#'
+#' @param profiles Named list of per-cell mutation matrices, keyed by lineage
+#'   string; rows are recovered integrations or genomes, columns positions.
+#' @param condense Logical. `TRUE` collapses contiguous deletion runs.
+#' @param urid Character run id naming the `output/score_mats/<urid>` tree.
+#' @param savename_prefix Character. Base file name of the written artifacts.
+#' @param mt_or_bc Character, `'mt'` or `'bc'`.
+#' @param recovered_ints Named list of the integration or genome indices
+#'   backing each cell's profile rows; also the barcode mask and the `'mt'`
+#'   allelic-fraction denominators.
+#' @param binarize_score Logical vector; `'mt'` only, one artifact per element.
+#' @param allelic_fraction_thresh Numeric vector; `'mt'` only, one artifact per
+#'   element, scores below the threshold set to 0.
+#' @param return_af_fracs Logical. `TRUE` returns per-cell raw counts instead
+#'   of writing files.
+#' @return In count mode, a list ordered like `profiles` whose entries are
+#'   named numeric vectors of raw counts across every mutation name, with
+#'   `NULL` for cells carrying no mutation. If no cell carries a mutation, the
+#'   `length(profiles)` x 1 all-zero sparse matrix with the single column
+#'   `control`. Otherwise `NULL`, after the artifacts are written.
+#' @section Side effects: Creates `output/score_mats/<urid>/matrices/af` and
+#'   `output/score_mats/<urid>/phylips/af` and writes the RDS and FASTA
+#'   artifacts described in the details.
+#' @note Retained for compatibility; sim5_code.R calls
+#'   `new_create_one_score_mat()`. The mutation table is built by `cbind()`
+#'   against the lineage string, so its columns are character; with
+#'   `condense = TRUE` and two or more deletions those character positions
+#'   reach `group_deletions()`, whose run arithmetic then errors.
 create_one_score_mat <- function(profiles,condense, urid, savename_prefix, mt_or_bc, 
                                  recovered_ints = NULL, binarize_score = FALSE, allelic_fraction_thresh = 0,
                                  return_af_fracs = FALSE){
@@ -579,6 +757,43 @@ create_one_score_mat <- function(profiles,condense, urid, savename_prefix, mt_or
 
 
 
+#' Score each cell's heteroplasmy burden
+#'
+#' Draws a severity score for every variant that is not yet in the severity
+#' map, then returns, per cell, the dot product of that cell's per-mutation
+#' values with the severity scores of the mutations the two share. Scores can
+#' be negative or positive, since severities are drawn from a two-component
+#' mixture centred at -1 and +1.
+#'
+#' @param cell_mut_counts Named list, one entry per cell, of named per-mutation
+#'   values -- what `new_create_one_score_mat(return_af_fracs = TRUE)` returns,
+#'   allelic fractions in the `'mt'` case.
+#' @param heteroplasmy_severity_score_list Named list mapping mutation name to
+#'   a numeric severity score. Variants missing from it are scored by
+#'   `draw_severity_scores()`, which sim5_code.R defines.
+#' @param positive_score_weight Numeric. Passed as `mean2_weight`: the weight
+#'   of the +1 component of the severity mixture.
+#' @param hetero_sd Numeric. Passed as `sigma`, the spread of both components.
+#' @param cell_population List of cell objects; part of the signature but not
+#'   used by the body.
+#' @param cell_to_num_mito_genomes_list Named list of per-cell genome counts,
+#'   read only when `normalize_cell_mut_counts` is `TRUE`.
+#' @param normalize_cell_mut_counts Logical. `TRUE` divides each cell's values
+#'   element-wise by its genome count into a local `norm_af`, which the scoring
+#'   step below does not read, so the returned scores are unaffected either
+#'   way.
+#' @return A named list with one numeric score per entry of `cell_mut_counts`,
+#'   in the same order.
+#' @section Side effects: Consumes draws from the R random number stream, one
+#'   per newly seen variant.
+#' @note The variants eligible for a new severity score are read from the first
+#'   entry of `cell_mut_counts` alone. A variant carried only by later cells
+#'   therefore never enters the severity map, and the name intersection used
+#'   for the dot product then drops it from those cells' scores.
+#' @note The `<<-` update binds to this function's own
+#'   `heteroplasmy_severity_score_list` argument, which shadows any outer
+#'   binding, so newly drawn severities live only for the duration of the call
+#'   and the caller's map comes back unchanged.
 get_norm_cell_heteroplasmy_scores <- function(cell_mut_counts,
                                           heteroplasmy_severity_score_list,
                                           positive_score_weight,

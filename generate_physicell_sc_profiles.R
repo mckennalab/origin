@@ -1,5 +1,14 @@
 #!/usr/bin/env Rscript
 
+# Command-line entry point that attaches simulated single-cell transcriptomes
+# to a finished lineage-recording run (PhysiCell, standalone import, or
+# Gillespie): it resolves the run directory, joins terminal-cell covariates,
+# standardizes a reference dataset, fits or reuses a cached scDesign3 model,
+# simulates counts, and writes them under lineage_recording/sc_profiles before
+# printing SCDESIGN3_OUTPUT_DIR=<path>. Run with Rscript; it sources
+# physicell_lineage.R, scdesign3_helpers.R, and physicell_scdesign3.R from its
+# own directory and needs scDesign3 installed (jsonlite for --celltype-map).
+
 script_argument <- commandArgs(trailingOnly = FALSE)[
   grepl('^--file=', commandArgs(trailingOnly = FALSE))
 ][1]
@@ -12,6 +21,13 @@ source(file.path(repo_root, 'physicell_lineage.R'))
 source(file.path(repo_root, 'scdesign3_helpers.R'))
 source(file.path(repo_root, 'physicell_scdesign3.R'))
 
+#' Build the command-line usage text for this script
+#'
+#' A pure string builder with no arguments and no external dependencies; it is
+#' emitted by `--help` and embedded in the argument-parsing error messages.
+#'
+#' @return A single newline-delimited character string listing the required
+#'   flags, the optional flags, and their defaults.
 physicell_scdesign3_usage <- function(){
   paste(
     'Usage:',
@@ -42,6 +58,32 @@ physicell_scdesign3_usage <- function(){
   )
 }
 
+#' Parse and type the scDesign3 profile-generation command line
+#'
+#' Walks the arguments left to right against a short/long alias table. Values
+#' may be given either as a separate following argument or inline after an `=`
+#' (the first `=` splits, and any later ones are kept in the value).
+#' `--use-pseudotime` is the only bare switch. `--ncores`, `--max-cells`, and
+#' `--seed` are coerced to integers and `--compress-csv` to a logical from a
+#' case-insensitive `true` or `false`; other values stay character strings.
+#'
+#' @param arguments Character vector of trailing command-line arguments, as
+#'   returned by `commandArgs(trailingOnly = TRUE)`.
+#' @return A named list of options with the defaults already applied:
+#'   `run_dir` and `reference` (both `NULL` until supplied), `output_dir`,
+#'   `lineage_table`, `celltype_map`, `cell_type`, `reference_spatial_cols`,
+#'   `other_covariates`, and `mu_formula` (`NULL`), `celltype_col`
+#'   (`cell_type`), `use_pseudotime` (`FALSE`), `pseudotime_col`
+#'   (`pseudotime`), `cache_dir` (`<repo>/output/scdesign3_fits`), `ncores`
+#'   (`4`), `max_cells` (`NA_integer_`, meaning no cap), `seed` (`1`), and
+#'   `compress_csv` (`TRUE`).
+#' @section Side effects: On `-h` or `--help`, prints the usage text and ends
+#'   the R session with status `0` rather than returning. Reads the
+#'   script-level `repo_root` to build the default `cache_dir`.
+#' @note Stops on an unrecognised flag, on a value-taking flag given without a
+#'   value, on a non-integer value for an integer option, and on a
+#'   `--compress-csv` value other than `true` or `false`. It does not check
+#'   that the required options were supplied; the caller does that.
 parse_physicell_scdesign3_args <- function(arguments){
   options <- list(
     run_dir = NULL,
@@ -152,17 +194,33 @@ set.seed(options$seed)
 
 run_dir <- normalizePath(options$run_dir, mustWork = TRUE)
 reference_path <- normalizePath(options$reference, mustWork = TRUE)
-recording_dir <- file.path(run_dir, 'lineage_recording')
-if(!dir.exists(recording_dir)){
-  stop(sprintf('Lineage-recording directory not found: %s.', recording_dir))
+recording_dir <- if(dir.exists(file.path(run_dir, 'lineage_recording'))){
+  file.path(run_dir, 'lineage_recording')
+} else if(!is.na(resolve_physicell_csv_path(
+  file.path(run_dir, 'lineage_nodes.csv'),
+  required = FALSE
+))){
+  # Standalone PhysiCell imports and Gillespie runs write directly into their
+  # selected output directory.
+  run_dir
+} else{
+  stop(sprintf('Lineage-recording tables not found under: %s.', run_dir))
 }
 lineage_table_path <- if(is.null(options$lineage_table)){
-  file.path(
-    run_dir,
-    'physicell_build',
-    'output',
-    'lineage_table.csv'
+  gillespie_cells <- resolve_physicell_csv_path(
+    file.path(recording_dir, 'gillespie_cell_states.csv'),
+    required = FALSE
   )
+  if(!is.na(gillespie_cells)){
+    gillespie_cells
+  } else{
+    file.path(
+      run_dir,
+      'physicell_build',
+      'output',
+      'lineage_table.csv'
+    )
+  }
 } else{
   options$lineage_table
 }

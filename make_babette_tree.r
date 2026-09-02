@@ -1,3 +1,10 @@
+# babette/BEAST 2 wrapper: turns a FASTA of reconstructed cell sequences into a
+# consensus phylogeny and writes Newick files for downstream tree comparison.
+# Requires the external BEAST 2 program (the conda env pins beast2=2.6.3 plus
+# beagle-lib) as well as the R packages loaded below - babette shells out to it,
+# so nothing here runs on a machine without BEAST 2 installed.
+# Optional module: the source() line for it in sim5_code.R is commented out.
+
 suppressPackageStartupMessages({
   library(babette)
   library(stringr)
@@ -7,12 +14,33 @@ suppressPackageStartupMessages({
 })
 
 
+#' Pull the BEAST 2 state-file path out of parsed babette output
+#'
+#' @param beast2_output Parsed babette output; element 35 of its `output`
+#'   character vector is read and everything from the first `/` onwards is taken
+#'   as the path.
+#' @return Single character path, or `NA` when that line holds no `/`.
+#' @note The line index is hard-coded, so this breaks if BEAST 2 changes its
+#'   banner. It is only reached from the commented-out parsing block inside
+#'   `fasta_to_phylo()`.
 extract_state_file_path <- function(beast2_output){
   text <- beast2_output$output[35]
   path <- str_extract(text, '\\/.*')
   return(path)
 }
 
+#' Extract the first Newick string from a BEAST 2 output file and save it
+#'
+#' Reads the whole file into one string, takes the first run that starts at `(`
+#' and stops before any `<`, and appends the terminating `;` that the Newick
+#' grammar requires.
+#'
+#' @param path_to_beast_output File to read the tree out of.
+#' @param newick_path Destination file for the extracted Newick string.
+#' @return Invisibly, the confirmation message; the tree itself is delivered
+#'   through `newick_path`.
+#' @section Side effects:
+#'   Overwrites `newick_path` and prints a line naming it.
 extract_newick_data <- function(path_to_beast_output, newick_path){
   
   lines <- readLines(path_to_beast_output)
@@ -34,6 +62,10 @@ extract_newick_data <- function(path_to_beast_output, newick_path){
   
 }
 
+#' Read a Newick file into an ape phylo object
+#'
+#' @param path_to_newick Path to a Newick file.
+#' @return The `phylo` object produced by `ape::read.tree()`.
 phylo_obj_from_newick <- function(path_to_newick){
   
   # all functions from ape
@@ -44,6 +76,56 @@ phylo_obj_from_newick <- function(path_to_newick){
   return(read.tree(path_to_newick))
 }
 
+#' Infer a consensus phylogeny from a FASTA by running BEAST 2 through babette
+#'
+#' Assembles a babette inference model, runs BEAST 2 over `fasta_path`, picks up
+#' the posterior tree file the run leaves in the working directory, and reduces
+#' the posterior sample to a single consensus tree whose tips are then
+#' relabelled.
+#'
+#' @details
+#' The external BEAST 2 program must be installed and reachable by babette
+#' (through `beastier`); this function only builds the model and reads the
+#' results back.
+#'
+#' MCMC and prior settings depend on `inf_model`. With the default `'test'`, the
+#' model comes from `create_test_inference_model()` with a default birth-death
+#' tree prior and `create_test_mcmc(chain_length = 100000, store_every = 1000)`.
+#' Any other value selects `create_inference_model()` with a birth-death prior
+#' whose birth rate is pinned to 1 and death rate to 0.5 by degenerate uniform
+#' distributions, after which `chain_length` (10000000) and `store_every` (1000)
+#' are assigned onto the returned model object. Neither branch sets a burn-in.
+#'
+#' The posterior trees are read with `ape::read.nexus`, forced binary one at a
+#' time with `multi2di`, and summarised with `ape::consensus(p = 0.2)`.
+#'
+#' @param fasta_path FASTA of per-cell sequences that BEAST 2 is run on.
+#' @param this_run_id Run label. Referenced only from commented-out output-path
+#'   code, so it does not affect the current path.
+#' @param linstrings Lineage strings for tip relabelling. Referenced only from
+#'   commented-out code.
+#' @param return_phylo When `TRUE` the consensus tree is returned; when `FALSE`
+#'   the function returns nothing and only the Newick files remain.
+#' @param inf_model `'test'` selects the short test chain; any other value
+#'   selects the long chain with fixed birth and death rates.
+#' @param beast_options Forwarded to `bbt_run_from_model()`. Leave as `FALSE` so
+#'   that `create_beast2_options()` fills in the defaults; the value is tested
+#'   with `if(!beast_options)`, so it has to stay logical.
+#' @param newick_out_path Path whose stem - everything before `.newick` - names
+#'   the two Newick outputs.
+#' @param site_model `'JC69'` or `'HKY'`; selects a babette site model object.
+#' @return The consensus `phylo` object when `return_phylo` is `TRUE`, otherwise
+#'   `NULL`.
+#' @section Side effects:
+#'   Runs BEAST 2, which drops `.trees`, `.log`, and `.csv` files into the
+#'   working directory, then writes `<stem>_preRELABEL.newick` (tips as BEAST 2
+#'   labelled them) and `<stem>_posRELABEL.newick` (each `_` in a tip label
+#'   replaced by `.`). Progress messages are printed throughout.
+#' @note The posterior sample is located by taking the newest `.trees` file in
+#'   `./` rather than from the run's own return value, so a stale or concurrent
+#'   `.trees` file in the working directory would be picked up instead. The site
+#'   model object built from `site_model` is not passed into the inference
+#'   model on the current code path.
 fasta_to_phylo <- function(fasta_path, this_run_id, linstrings = NULL, return_phylo = TRUE, inf_model = 'test', 
                            beast_options = FALSE, newick_out_path = '',
                            site_model = 'JC69'){

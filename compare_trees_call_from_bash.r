@@ -1,3 +1,49 @@
+# compare_trees_call_from_bash.r
+#
+# Scores one iqtree-reconstructed lineage tree against the simulator's ground
+# truth for the same timepoint, renders both trees coloured by cell type, and
+# writes the normalized Robinson-Foulds distance that
+# process_results_from_bash.r later aggregates.
+#
+# Invoked once per reconstruction directory by bash_wrapper_all_combos.sh, from
+# inside output/recon_trees/<run_id>/<tree_dir>/, as:
+#   Rscript compare_trees_call_from_bash.r -R <treefile name> -I <run_id> \
+#           -S <savename prefix> -P <param json path> -T <abs tree dir path>
+# Command-line arguments (optparse):
+#   -R / --recon_tree_path         iqtree .treefile; a relative value is
+#                                  resolved against -T
+#   -G / --ground_truth_tree_path  optional explicit ground-truth Newick;
+#                                  default '' means match one by timepoint.
+#                                  The wrapper does not pass this flag.
+#   -I / --run_id                  run id (numeric string)
+#   -S / --savename_prefix         prefix for the tree image and the results txt
+#   -P / --param_file              path of the JSON parameter file for this run,
+#                                  recorded verbatim in the results txt
+#   -T / --treefile_dir_path       directory holding the .treefile; the script
+#                                  setwd()s here
+# -R, -I, -S and -T are required.
+#
+# Because the script works from the tree directory, output paths are built from
+# the relative stem '../../../../output', which resolves to <repo>/output only
+# when the tree directory sits exactly four levels below the repo root, as
+# output/recon_trees/<run_id>/<tree_dir>/ does.
+#
+# Inputs:
+#   <tree dir>/<recon tree>.treefile
+#   output/processed_newicks/<run_id>/ground_truth_*time_<t>*  (exactly one must
+#                                  match the timepoint parsed from -R)
+#   output/cell_populations/<run_id>/*time_<t>*.rds  (exactly one must match; a
+#                                  named list of cell records keyed by lineage
+#                                  string, each carrying $celltype)
+#
+# Outputs:
+#   output/tree_images/<run_id>/<savename_prefix>.pdf   reconstructed tree
+#   output/tree_images/<run_id>/gt_timept_<t>.pdf       ground-truth tree
+#   output/rf_dist_files/<run_id>/<savename_prefix>_rf.txt  line 1 normalized RF
+#                                  distance, line 2 the -P parameter file path
+#
+# Requires optparse, ape, phangorn, stringr, and RColorBrewer.
+
 suppressPackageStartupMessages({
   library(optparse)
   library(ape)
@@ -97,6 +143,22 @@ full_cell_pop_path <- file.path(output_dir_stem, 'cell_populations', input_args$
 
 # can build a wrapper around this if i want to allow the user to pick between ML and consensus trees
 # and to specify whether midpoint root is wanted. 
+#' Render a tree to a tall PNG
+#'
+#' Reads a Newick/treefile, optionally midpoint-roots it with
+#' `phangorn::midpoint()`, and plots it with small tip labels.
+#'
+#' @param tree_path Path to the tree file to read with `ape::read.tree()`.
+#' @param savename_prefix Basename (without extension) of the PNG to write.
+#' @param cell_pop_path Retained for call compatibility; the body does not use
+#'   it.
+#' @param midpt When TRUE, midpoint-root the tree before plotting.
+#' @return NULL, invisibly; called for the file it writes.
+#' @section Side effects: Creates `output/tree_images/<run_id>/` when absent and
+#'   writes `<savename_prefix>.png` (1500x4000 px, res 300) into it. The run id
+#'   comes from the script-level `input_args$run_id`, not from an argument.
+#' @note Not called anywhere in this script; `plot_tree_with_color()` produces
+#'   the images the pipeline uses.
 save_image_of_tree <- function(tree_path, savename_prefix, cell_pop_path, midpt = FALSE){
   
   this_tree <- ape::read.tree(tree_path)
@@ -116,6 +178,32 @@ save_image_of_tree <- function(tree_path, savename_prefix, cell_pop_path, midpt 
   
 }
 
+#' Draw a fan tree with tips coloured by simulated cell type
+#'
+#' Tip labels are looked up as lineage strings in the cell-population list saved
+#' by the simulator, and each tip takes the colour of that cell's `celltype`;
+#' a type outside the colour map draws as `grey70`. Unless a map is supplied,
+#' colours come from `RColorBrewer`'s Set2 palette, ramped when there are more
+#' than eight types. Reconstructed trees additionally get rounded branch lengths
+#' drawn on the edges; ground-truth trees can get their internal nodes coloured
+#' by the cell type of the node's own lineage string.
+#'
+#' @param path_to_tree Tree file read with `ape::read.tree()`.
+#' @param path_to_cellpop `.rds` holding the named cell-population list for the
+#'   matching timepoint; its names must cover the tree's tip labels.
+#' @param image_savename Basename (without extension) of the PDF to write.
+#' @param recon_or_gt `'recon'` to label edges with branch lengths, `'gt'` to
+#'   allow internal-node colouring.
+#' @param color_internal_nodes When TRUE and `recon_or_gt` is `'gt'`, colour the
+#'   internal nodes; requires the tree to carry node labels that are also cell
+#'   names in the population list.
+#' @param color_map_list Optional named vector/list mapping cell type to colour.
+#'   When NULL a palette is derived from the cell types present in the
+#'   population.
+#' @return NULL, invisibly; called for the file it writes.
+#' @section Side effects: Creates `output/tree_images/<run_id>/` when absent and
+#'   writes `<image_savename>.pdf` (height 25) into it. The run id comes from
+#'   the script-level `input_args$run_id`, not from an argument.
 plot_tree_with_color <- function(path_to_tree,
                                  path_to_cellpop,
                                  image_savename,

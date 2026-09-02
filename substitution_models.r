@@ -1,3 +1,9 @@
+# Nucleotide substitution models (JC, K80, K81, F81, HKY, GTR) plus the
+# gamma-based per-position rate helpers used for target and non-target sites.
+# Every *_sub_rate_mat() returns a 4x4 matrix of per-timepoint substitution
+# probabilities whose rows are the source base and whose columns are the
+# destination base, both ordered A, G, C, T (the 1, 2, 3, 4 encoding used
+# throughout the simulator). Sourced by sim5_code.R; attaches its own packages.
 suppressPackageStartupMessages({
   library(phangorn)
   library(ggplot2)
@@ -11,6 +17,18 @@ suppressPackageStartupMessages({
 
 # all nucleotide matrices have order AGCT
 
+#' Build a Jukes-Cantor (JC) substitution rate matrix
+#'
+#' One free parameter: all 12 non-self substitutions share a single rate and
+#' the base composition is ignored.
+#'
+#' @param overall_sub_rate Numeric scalar. Per-timepoint probability assigned
+#'   to each of the 12 off-diagonal from-base/to-base pairs.
+#' @return A 4x4 numeric matrix. Rows are the source base and columns the
+#'   destination base, both ordered A, G, C, T. Every off-diagonal entry is
+#'   `overall_sub_rate` and the diagonal is 0. Entries are per-substitution
+#'   probabilities, not a normalized transition distribution, so rows do not
+#'   sum to 1.
 jc_sub_rate_mat <- function(overall_sub_rate){
   # Jukes-Cantor model
   # overall_sub_rate: numeric. overall probability of a substitution occurring
@@ -28,6 +46,27 @@ jc_sub_rate_mat <- function(overall_sub_rate){
 }
 
 
+#' Build a Kimura two-parameter (K80) substitution rate matrix
+#'
+#' Two free rates: one shared transition rate for A<->G and C<->T, and one
+#' shared transversion rate for the four remaining base pairs. The three
+#' arguments are a redundant parametrisation of those two rates, so any two of
+#' them determine the third; whichever one is left `NULL` is derived. Base
+#' composition is ignored.
+#'
+#' @param transition_to_transversion_ratio Numeric scalar or `NULL`. Equals
+#'   `transition_rate / transversion_rate`.
+#' @param transition_rate Numeric scalar or `NULL`. Probability of an A<->G or
+#'   C<->T substitution.
+#' @param transversion_rate Numeric scalar or `NULL`. Probability of any one of
+#'   the four transversion substitutions (A<->C, A<->T, G<->C, G<->T).
+#' @return A 4x4 numeric matrix of substitution probabilities, rows = source
+#'   base and columns = destination base, both ordered A, G, C, T. The diagonal
+#'   is 0, the (A,G), (G,A), (C,T) and (T,C) entries hold `transition_rate` and
+#'   the remaining eight hold `transversion_rate`; rows do not sum to 1.
+#' @note At least two of the three arguments must be supplied, all supplied
+#'   values must be finite and non-negative, and a zero ratio cannot be used to
+#'   derive `transversion_rate`; each of these raises an error.
 k80_sub_rate_mat <- function(transition_to_transversion_ratio = NULL, transition_rate = NULL,
                              transversion_rate = NULL){
   # Kimura's 2-parameter (K80) model 
@@ -83,6 +122,25 @@ k80_sub_rate_mat <- function(transition_to_transversion_ratio = NULL, transition
 }
 
 
+#' Build a Kimura three-parameter (K81) substitution rate matrix
+#'
+#' Three free rates: one transition rate and two transversion rates, one per
+#' pair of complementary transversion classes. Base composition is ignored and
+#' no normalization is applied.
+#'
+#' @param transition_rate Numeric scalar. Probability placed on A<->G and
+#'   C<->T.
+#' @param transversion_rate_weakstrong_conserved Numeric scalar. Probability
+#'   placed on the A<->C and G<->T entries of the returned matrix.
+#' @param transversion_rate_aminoketo_conserved Numeric scalar. Probability
+#'   placed on the A<->T and G<->C entries of the returned matrix.
+#' @return A 4x4 numeric matrix of substitution probabilities, rows = source
+#'   base and columns = destination base, both ordered A, G, C, T. The matrix
+#'   is symmetric with a 0 diagonal; rows do not sum to 1.
+#' @note A<->C and G<->T are the amino- and keto-conserving transversions while
+#'   A<->T and G<->C are the weak/strong-conserving ones, so each transversion
+#'   argument is placed on the class opposite to the one its name describes.
+#'   This only matters when the two transversion rates differ.
 k81_sub_rate_mat <- function(transition_rate, 
                              transversion_rate_weakstrong_conserved, 
                              transversion_rate_aminoketo_conserved){
@@ -114,6 +172,27 @@ k81_sub_rate_mat <- function(transition_rate,
   return(rate_mat)
 }
 
+#' Build a Felsenstein 1981 (F81) substitution rate matrix
+#'
+#' Five arguments: the four nucleotide fractions of the sequence plus one
+#' baseline rate. Each destination base is weighted by how far its fraction
+#' deviates from 0.25 (`baseline * (1 + frac_dest - 0.25)`), which makes the
+#' matrix constant down each column; the 12 off-diagonal entries are then
+#' rescaled so that their mean is exactly `baseline_overall_sub_rate`.
+#'
+#' @param frac_a Numeric scalar. Fraction of the sequence that is A.
+#' @param frac_g Numeric scalar. Fraction of the sequence that is G.
+#' @param frac_c Numeric scalar. Fraction of the sequence that is C.
+#' @param frac_t Numeric scalar. Fraction of the sequence that is T. The four
+#'   fractions are expected to sum to 1; this is not checked.
+#' @param baseline_overall_sub_rate Numeric scalar. Target mean probability
+#'   across the 12 non-self substitutions.
+#' @return A 4x4 numeric matrix of substitution probabilities, rows = source
+#'   base and columns = destination base, both ordered A, G, C, T. The diagonal
+#'   is 0, the three off-diagonal entries within a column are identical (the
+#'   rate depends only on the destination base), and the mean of the 12
+#'   off-diagonal entries equals `baseline_overall_sub_rate`; rows do not sum
+#'   to 1. A `baseline_overall_sub_rate` of 0 returns the 4x4 zero matrix.
 f81_sub_rate_mat <- function(frac_a,
                              frac_g,
                              frac_c,
@@ -159,6 +238,36 @@ f81_sub_rate_mat <- function(frac_a,
 }
 
 
+#' Build a Hasegawa-Kishino-Yano (HKY) substitution rate matrix
+#'
+#' Combines base composition with a transition/transversion distinction: every
+#' off-diagonal entry is a baseline rate (the transition rate for A<->G and
+#' C<->T, the transversion rate for the other four pairs) multiplied by the
+#' destination weight `1 + frac_dest - 0.25`. The whole matrix is then rescaled
+#' so that the mean of the 12 off-diagonal entries equals the harmonic mean of
+#' the two baseline rates (`psych::harmonic.mean`).
+#'
+#' @param frac_a Numeric scalar. Fraction of the sequence that is A.
+#' @param frac_g Numeric scalar. Fraction of the sequence that is G.
+#' @param frac_c Numeric scalar. Fraction of the sequence that is C.
+#' @param frac_t Numeric scalar. Fraction of the sequence that is T. The four
+#'   fractions are expected to sum to 1; this is not checked.
+#' @param transition_to_transversion_ratio Numeric scalar or `NULL`. Equals
+#'   `baseline_transition_rate / baseline_transversion_rate`.
+#' @param baseline_transition_rate Numeric scalar or `NULL`. Pre-weighting rate
+#'   for A<->G and C<->T.
+#' @param baseline_transversion_rate Numeric scalar or `NULL`. Pre-weighting
+#'   rate for the four transversion pairs.
+#' @return A 4x4 numeric matrix of substitution probabilities, rows = source
+#'   base and columns = destination base, both ordered A, G, C, T, with a 0
+#'   diagonal; rows do not sum to 1. Rows are named `from_a_rate`,
+#'   `from_g_rate`, `from_c_rate` and `from_t_rate` (a by-product of `rbind`)
+#'   while columns are unnamed. Two zero baseline rates return the 4x4 zero
+#'   matrix.
+#' @note As in K80, at least two of the ratio and the two baseline rates must
+#'   be supplied, supplied values must be finite and non-negative, and a zero
+#'   ratio cannot be used to derive `baseline_transversion_rate`; each of these
+#'   raises an error.
 hky_sub_rate_mat <- function(frac_a, frac_g, frac_c, frac_t, transition_to_transversion_ratio = NULL,
                              baseline_transition_rate = NULL, baseline_transversion_rate = NULL){
   # Hasegawa-Kishino-Yano (HKY) model
@@ -258,6 +367,28 @@ hky_sub_rate_mat <- function(frac_a, frac_g, frac_c, frac_t, transition_to_trans
 }
 
 
+#' Build a General Time Reversible (GTR) substitution rate matrix
+#'
+#' Ten arguments: six symmetric exchangeabilities, one per unordered base pair,
+#' and the four nucleotide fractions. The entry for a from/to pair is that
+#' pair's exchangeability multiplied by the fraction of the destination base,
+#' so the matrix satisfies `frac_from * rate[from, to] == frac_to *
+#' rate[to, from]`. No normalization is applied and no argument is validated.
+#'
+#' @param ag_rate Numeric scalar. Exchangeability of the A/G pair.
+#' @param ac_rate Numeric scalar. Exchangeability of the A/C pair.
+#' @param at_rate Numeric scalar. Exchangeability of the A/T pair.
+#' @param gc_rate Numeric scalar. Exchangeability of the G/C pair.
+#' @param gt_rate Numeric scalar. Exchangeability of the G/T pair.
+#' @param ct_rate Numeric scalar. Exchangeability of the C/T pair.
+#' @param frac_a Numeric scalar. Fraction of the sequence that is A.
+#' @param frac_g Numeric scalar. Fraction of the sequence that is G.
+#' @param frac_c Numeric scalar. Fraction of the sequence that is C.
+#' @param frac_t Numeric scalar. Fraction of the sequence that is T.
+#' @return A 4x4 numeric matrix of substitution probabilities, rows = source
+#'   base and columns = destination base, both ordered A, G, C, T, with a 0
+#'   diagonal. The matrix is only symmetric when all four fractions are equal,
+#'   and rows do not sum to 1.
 gtr_sub_rate_mat <- function(ag_rate,
                              ac_rate,
                              at_rate,
@@ -298,6 +429,36 @@ gtr_sub_rate_mat <- function(ag_rate,
 
 
 
+#' Draw per-target edit rates from a binned gamma distribution
+#'
+#' Unlike the *_sub_rate_mat() models, this assigns a rate to a position rather
+#' than to a base pair: it bootstraps `num_bootstrap_draws` gamma values, splits
+#' them at quantiles whose widths are the relative counts of the low, medium and
+#' high target classes, then samples (with replacement) one draw from the
+#' matching bin for each target position. Low-rate targets therefore draw from
+#' the bottom of the gamma, medium from the middle and high from the top, so
+#' baseline rate and rate heterogeneity are estimated together.
+#'
+#' @param sequence_length Integer. Length of the barcode sequence; part of the
+#'   signature but not used by the body.
+#' @param h_pos Integer vector. Positions of the high-edit-rate targets.
+#' @param m_pos Integer vector. Positions of the medium-edit-rate targets.
+#' @param l_pos Integer vector. Positions of the low-edit-rate targets.
+#' @param shape_param Numeric. Shape of the gamma the rates are drawn from.
+#' @param scale_param Numeric. Scale of that gamma.
+#' @param num_bootstrap_draws Numeric. Number of gamma draws to bin and sample
+#'   from.
+#' @return A named list of per-position edit rates: names are target positions
+#'   as characters, values are numeric per-timepoint rates. An empty list when
+#'   there are no targets. Positions that appear in more than one class are
+#'   collapsed to their maximum rate, which also leaves the list ordered by
+#'   position name as a character sort rather than in H/M/L order.
+#' @section Side effects: Consumes draws from the R random number stream
+#'   (`rgamma` and `sample`).
+#' @note Empty classes are dropped before the quantile cutpoints are computed,
+#'   so a missing class does not shift the remaining ones. If every gamma draw
+#'   comes back identical the function exits early and gives every target that
+#'   one value, keeping duplicate position names if any exist.
 SIMPLIFY_target_site_gamma_based_sub_rates <- function(sequence_length, h_pos, m_pos, l_pos, 
                                               shape_param = 0.5, scale_param = 0.001,
                                               num_bootstrap_draws = 1000){
@@ -379,6 +540,23 @@ SIMPLIFY_target_site_gamma_based_sub_rates <- function(sequence_length, h_pos, m
 }
 
 
+#' Choose the positions that are forced to be invariant
+#'
+#' Selects `round(frac_invariant * length(eligible_invariant_sites))` positions
+#' without replacement; callers zero the substitution probability at these
+#' positions. Restricting the eligible set is how target sites are kept out of
+#' the invariant pool.
+#'
+#' @param eligible_invariant_sites Integer vector of positions allowed to
+#'   become invariant.
+#' @param frac_invariant Numeric in [0, 1]. Fraction of those positions to make
+#'   invariant.
+#' @return An integer vector of the sampled positions; empty when the rounded
+#'   count is 0.
+#' @section Side effects: Consumes draws from the R random number stream
+#'   (`sample`).
+#' @note `sample()` is called on `eligible_invariant_sites` directly, so a
+#'   single-element eligible set of value n is interpreted as `1:n`.
 nontarget_get_invariant_inds <- function(eligible_invariant_sites, 
                                          frac_invariant){
   # Add invariant sites to background mutational processes
@@ -402,6 +580,35 @@ nontarget_get_invariant_inds <- function(eligible_invariant_sites,
 }
 
 
+#' Scale per-position rates by discretized gamma heterogeneity
+#'
+#' Bootstraps 10000 gamma draws, optionally reduces them to `num_discrete_bins`
+#' equal-probability bins summarized by their mean or median, and multiplies
+#' every rate in `position_er_list` by one scaling factor sampled from those
+#' values. The sampling is done independently for each element inside a
+#' position, so a position holding several rates (for example separate
+#' transition and transversion rates) gets a separate factor per rate.
+#'
+#' @param position_er_list List whose names are position numbers and whose
+#'   elements are the rate (or list of rates) at that position.
+#' @param shape_param Numeric. Shape of the heterogeneity gamma; `0` returns
+#'   `position_er_list` unchanged.
+#' @param scale_param Numeric. Scale of that gamma; the default `1/shape_param`
+#'   makes its expectation 1, so rates are preserved in expectation. The draws
+#'   themselves are not re-normalized.
+#' @param num_discrete_bins Integer >= 0. Number of equal-area bins the gamma is
+#'   collapsed into; `0` samples scaling factors from the raw draws instead.
+#' @param bin_agg_metric Character, `'mean'` or `'median'`. Statistic used to
+#'   summarize each bin.
+#' @return A copy of `position_er_list` with the same names and nesting, every
+#'   rate multiplied by its own scaling factor.
+#' @section Side effects: Consumes draws from the R random number stream
+#'   (`rgamma` and `sample`).
+#' @note Returns the input untouched for an empty list or `shape_param == 0`
+#'   before any validation runs; otherwise a non-finite or non-positive gamma
+#'   parameter, a `bin_agg_metric` other than mean/median, and a
+#'   `num_discrete_bins` that is not one non-negative integer each raise an
+#'   error.
 nontarget_scale_gamma_heterogeneity <- function(position_er_list, shape_param = 0.5, scale_param = 1/shape_param,
                                                 num_discrete_bins = 4, bin_agg_metric = 'mean'){
   # Scale substitution rates with stochastic gamma-distribution-based heterogeneity

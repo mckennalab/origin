@@ -3,6 +3,18 @@
 # This file intentionally contains functions only so it can be sourced from
 # tests, notebooks, or the simulate_physicell_lineage.R command-line wrapper.
 
+# ---- Cell IDs and CSV input/output ----
+
+#' Normalize PhysiCell cell IDs to stable character keys
+#'
+#' Coerces the IDs through `as.numeric` and rejects anything that is not a
+#' finite non-negative whole number, then formats them without scientific
+#' notation so the same cell always yields the same character key.
+#'
+#' @param values PhysiCell ID values; factors, characters, and numerics are all
+#'   accepted.
+#' @param field_name Label used in the error message when validation fails.
+#' @return A character vector the same length as `values`.
 physicell_id <- function(values, field_name = 'cell ID'){
   if(is.factor(values)){
     values <- as.character(values)
@@ -15,6 +27,12 @@ physicell_id <- function(values, field_name = 'cell ID'){
   format(numeric_values, scientific = FALSE, trim = TRUE, digits = 22)
 }
 
+#' Build the canonical CSV output path for a table
+#'
+#' @param path Base CSV path; must be one non-empty string.
+#' @param compress When `TRUE`, ensure the path ends in `.gz`; when `FALSE`,
+#'   strip a trailing `.gz`.
+#' @return The resolved output path as one string.
 physicell_csv_output_path <- function(path, compress = TRUE){
   path <- as.character(path)
   if(length(path) != 1 || is.na(path) || !nzchar(path)){
@@ -31,6 +49,15 @@ physicell_csv_output_path <- function(path, compress = TRUE){
   }
 }
 
+#' Resolve a CSV path to whichever of its plain/gzipped forms exists
+#'
+#' Checks both `<path>` and `<path>.gz` (or the `.gz`-stripped form when `path`
+#' already ends in `.gz`), preferring the gzipped file.
+#'
+#' @param path CSV or CSV-gzip path; must be one non-empty string.
+#' @param required When `TRUE`, a missing file raises an error; when `FALSE`,
+#'   `NA_character_` is returned instead.
+#' @return The path of the existing file, or `NA_character_`.
 resolve_physicell_csv_path <- function(path, required = TRUE){
   path <- as.character(path)
   if(length(path) != 1 || is.na(path) || !nzchar(path)){
@@ -54,6 +81,17 @@ resolve_physicell_csv_path <- function(path, required = TRUE){
   NA_character_
 }
 
+#' Write a table as CSV, gzip-compressed by default
+#'
+#' @param x Object accepted by `utils::write.csv`.
+#' @param path Base output path; the `.gz` suffix is added or removed by
+#'   `physicell_csv_output_path()`.
+#' @param row.names Forwarded to `utils::write.csv`.
+#' @param compress When `TRUE`, write through a `gzfile` connection at
+#'   compression level 6.
+#' @param ... Further arguments forwarded to `utils::write.csv`.
+#' @return Invisibly, the normalized path of the file that was written.
+#' @section Side effects: Creates or overwrites the resolved CSV file.
 write_physicell_csv <- function(x,
                                 path,
                                 row.names = FALSE,
@@ -86,6 +124,12 @@ write_physicell_csv <- function(x,
   invisible(normalizePath(output_path, mustWork = TRUE))
 }
 
+#' Read a CSV that may be stored plain or gzipped
+#'
+#' @param path CSV or CSV-gzip path, resolved by `resolve_physicell_csv_path()`.
+#' @param required When `FALSE` and neither form exists, `NULL` is returned.
+#' @param ... Further arguments forwarded to `utils::read.csv`.
+#' @return A data frame, or `NULL` for an optional missing table.
 read_physicell_csv <- function(path, required = TRUE, ...){
   input_path <- resolve_physicell_csv_path(path, required = required)
   if(is.na(input_path)){
@@ -99,6 +143,21 @@ read_physicell_csv <- function(path, required = TRUE, ...){
   utils::read.csv(input_path, ...)
 }
 
+# ---- Division-event ingestion and lineage reconstruction ----
+
+#' Validate and canonicalize a PhysiCell division-event table
+#'
+#' Strips a byte-order mark and surrounding whitespace from the column names,
+#' keeps only `time`, `parent_ID`, and `daughter_ID`, normalizes both ID columns
+#' with `physicell_id()`, and sorts events by time with input order as the
+#' tie-break. A daughter that already existed as a parent in an earlier row is
+#' rejected with one linear `match()` rather than a per-row scan.
+#'
+#' @param divisions Data frame that must contain `time`, `parent_ID`, and
+#'   `daughter_ID`. Times must be finite and non-negative, a parent may not be
+#'   its own daughter, and each daughter may be born only once.
+#' @return The time-sorted event table with an added `.input_order` column and a
+#'   `physicell_validated` attribute set to `TRUE`.
 validate_physicell_divisions <- function(divisions){
   if(!is.data.frame(divisions)){
     stop('PhysiCell divisions must be supplied as a data frame.')
@@ -165,6 +224,10 @@ validate_physicell_divisions <- function(divisions){
   divisions
 }
 
+#' Read and validate a PhysiCell division-event CSV
+#'
+#' @param path Path to the division CSV; the file must exist.
+#' @return The validated table from `validate_physicell_divisions()`.
 read_physicell_divisions <- function(path){
   if(length(path) != 1 || is.na(path) || !file.exists(path)){
     stop(sprintf('PhysiCell division file not found: %s.', path))
@@ -177,6 +240,13 @@ read_physicell_divisions <- function(path){
   validate_physicell_divisions(divisions)
 }
 
+#' Read the unique cell IDs out of a PhysiCell cell table
+#'
+#' @param path Path to a PhysiCell cell CSV; the file must exist.
+#' @param table_description Label used in the error messages.
+#' @param alive_only When `TRUE` and the table has an `alive` column, keep only
+#'   rows flagged `true`/`1`; other spellings raise an error.
+#' @return A character vector of unique normalized IDs.
 read_physicell_cell_ids <- function(path,
                                     table_description = 'PhysiCell cell table',
                                     alive_only = FALSE){
@@ -214,6 +284,11 @@ read_physicell_cell_ids <- function(path,
   unique(physicell_id(cell_table$ID, 'ID'))
 }
 
+#' Read the live-cell IDs that terminate the sampled lineage
+#'
+#' @param path Path to the PhysiCell live-cell CSV.
+#' @return Unique IDs of cells whose `alive` flag is true, when that column is
+#'   present.
 read_physicell_terminal_ids <- function(path){
   read_physicell_cell_ids(
     path,
@@ -222,6 +297,10 @@ read_physicell_terminal_ids <- function(path){
   )
 }
 
+#' Read the explicit day-zero founder IDs
+#'
+#' @param path Path to the PhysiCell founder CSV.
+#' @return Unique IDs from the table, with no alive filtering.
 read_physicell_founder_ids <- function(path){
   read_physicell_cell_ids(
     path,
@@ -230,6 +309,28 @@ read_physicell_founder_ids <- function(path){
   )
 }
 
+#' Convert PhysiCell division events into a binary lineage node table
+#'
+#' PhysiCell reuses a parent's ID across every division, so one ID spans many
+#' branch segments. Each event closes the parent's current segment and opens two
+#' new ones (`continuing_parent` and `new_daughter`), giving a binary tree. The
+#' node columns are preallocated to `founders + 2 * divisions` rows and the
+#' currently active node for each PhysiCell ID is held in a hashed environment,
+#' so the sweep over events is linear.
+#'
+#' @param divisions Division events; revalidated unless they already carry the
+#'   `physicell_validated` attribute.
+#' @param end_time Final sampling time; must be finite and no earlier than the
+#'   last division. Every still-open segment ends here.
+#' @param founder_time Birth time given to founder segments; must be finite and
+#'   no later than `end_time`.
+#' @param founder_ids Optional explicit founder IDs seeded before the sweep;
+#'   parents first seen in the events become founders implicitly.
+#' @param show_progress Whether to emit progress messages.
+#' @param progress_updates Approximate number of progress messages to emit.
+#' @return A data frame with one row per branch segment, holding `node_id`,
+#'   `physicell_id`, `parent_node_id`, `birth_time`, `end_time`,
+#'   `branch_length`, `division_event`, `origin`, and `is_terminal`.
 build_physicell_lineage <- function(divisions,
                                     end_time,
                                     founder_time = 0,
@@ -293,6 +394,15 @@ build_physicell_lineage <- function(divisions,
     size = max(29L, possible_founder_count + num_divisions)
   )
 
+  #' Internal: fill the next preallocated branch-segment row
+  #'
+  #' @param cell_id PhysiCell ID that owns the segment.
+  #' @param parent_node_id `node_id` of the segment this one descends from, or
+  #'   `NA_character_` for a founder.
+  #' @param birth_time Time at which the segment starts.
+  #' @param origin One of `founder`, `continuing_parent`, or `new_daughter`.
+  #' @param event_index Row index of the division that created the segment.
+  #' @return The integer index of the row just filled.
   add_node <- function(cell_id, parent_node_id, birth_time, origin, event_index){
     node_count <<- node_count + 1L
     if(node_count > node_capacity){
@@ -306,6 +416,10 @@ build_physicell_lineage <- function(divisions,
     node_count
   }
 
+  #' Internal: create and activate one founder segment
+  #'
+  #' @param cell_id Cell ID to seed; an already active ID is left untouched.
+  #' @return Invisibly, the integer node index now active for `cell_id`.
   add_founder <- function(cell_id){
     if(exists(cell_id, envir = active_nodes, inherits = FALSE)){
       return(invisible(get(
@@ -425,6 +539,13 @@ build_physicell_lineage <- function(divisions,
   )
 }
 
+# ---- Newick rendering ----
+
+#' Quote node labels that are not Newick-safe
+#'
+#' @param label Vector of arbitrary node or tip labels.
+#' @return The labels unchanged where they match `[A-Za-z0-9_.-]+`, otherwise
+#'   wrapped in single quotes with any embedded quote doubled.
 escape_newick_label <- function(label){
   label <- as.character(label)
   safe <- !is.na(label) & grepl("^[A-Za-z0-9_.-]+$", label)
@@ -439,6 +560,21 @@ escape_newick_label <- function(label){
   escaped
 }
 
+#' Precompute the topology and tokens needed to render a Newick tree
+#'
+#' Validates that every parent precedes its children, marks the ancestors of the
+#' retained tips in a single reverse pass over the node table, and groups the
+#' kept children by parent with a radix sort so each node's children occupy a
+#' contiguous slice of `child_order`. Branch lengths and labels are formatted
+#' once here instead of during traversal.
+#'
+#' @param nodes Node table with `node_id`, `physicell_id`, `parent_node_id`,
+#'   `branch_length`, and `is_terminal`; node IDs must be unique.
+#' @param terminal_physicell_ids Optional PhysiCell IDs to retain as tips; each
+#'   must belong to a terminal node. `NULL` retains every terminal node.
+#' @return A list with `num_nodes`, `num_kept_nodes`, `root_indices`,
+#'   `child_counts`, `child_starts`, `child_ends`, `child_order`, `tip_tokens`,
+#'   and `close_tokens`.
 prepare_physicell_newick <- function(nodes, terminal_physicell_ids = NULL){
   required <- c(
     'node_id', 'physicell_id', 'parent_node_id', 'branch_length', 'is_terminal'
@@ -560,6 +696,19 @@ prepare_physicell_newick <- function(nodes, terminal_physicell_ids = NULL){
   )
 }
 
+#' Traverse the retained forest and emit Newick tokens in order
+#'
+#' Uses an explicit integer stack rather than recursion: a positive entry is a
+#' node to visit, its negation closes that node, and `0` emits a separating
+#' comma. The whole forest is wrapped in one synthetic `remote_mito_root`.
+#'
+#' @param prepared Topology from `prepare_physicell_newick()`.
+#' @param emit_token Function called once per token; it decides whether tokens
+#'   are buffered in memory or streamed to a connection.
+#' @param show_progress Whether to emit progress messages.
+#' @param progress_updates Approximate number of progress messages to emit.
+#' @param progress_label Label used in the progress messages.
+#' @return Invisibly, the number of nodes rendered.
 emit_physicell_newick <- function(prepared,
                                   emit_token,
                                   show_progress = FALSE,
@@ -580,6 +729,12 @@ emit_physicell_newick <- function(prepared,
   stack <- integer(max(3L * prepared$num_kept_nodes, 1L))
   stack_top <- 0L
   rendered_nodes <- 0L
+
+  #' Internal: push one traversal event onto the explicit stack
+  #'
+  #' @param event Node index to visit, its negation to close that node, or `0L`
+  #'   for a separating comma.
+  #' @return Called for its effect on the enclosing `stack` and `stack_top`.
   push_event <- function(event){
     stack_top <<- stack_top + 1L
     stack[stack_top] <<- event
@@ -626,12 +781,28 @@ emit_physicell_newick <- function(prepared,
   invisible(rendered_nodes)
 }
 
+#' Render a lineage node table as one Newick string
+#'
+#' Compatibility wrapper that collects the tokens from
+#' `emit_physicell_newick()` into a preallocated character vector and pastes
+#' them together, preserving unary nodes and elapsed branch times.
+#'
+#' @param nodes Event-resolved lineage node table.
+#' @param terminal_physicell_ids Optional PhysiCell IDs to retain as tips.
+#' @return One Newick string ending in `)remote_mito_root;`.
+#' @note Holds the entire tree in memory; use
+#'   `write_physicell_lineage_newick()` for large lineages.
 physicell_lineage_to_newick <- function(nodes, terminal_physicell_ids = NULL){
   prepared <- prepare_physicell_newick(nodes, terminal_physicell_ids)
   max_tokens <- 4L * prepared$num_kept_nodes +
     2L * length(prepared$root_indices) + 2L
   tokens <- character(max_tokens)
   token_count <- 0L
+
+  #' Internal: append one token to the in-memory token vector
+  #'
+  #' @param token One Newick token.
+  #' @return `NULL`, invisibly.
   emit_token <- function(token){
     token_count <<- token_count + 1L
     tokens[token_count] <<- token
@@ -645,6 +816,21 @@ physicell_lineage_to_newick <- function(nodes, terminal_physicell_ids = NULL){
   paste0(tokens[seq_len(token_count)], collapse = '')
 }
 
+#' Stream a lineage node table to a Newick file
+#'
+#' Renders the tree with the iterative emitter and writes it through a bounded
+#' token buffer, so neither the traversal nor the output ever holds a complete
+#' subtree string.
+#'
+#' @param nodes Event-resolved lineage node table.
+#' @param path Destination file, opened in binary mode.
+#' @param terminal_physicell_ids Optional PhysiCell IDs to retain as tips.
+#' @param show_progress Whether to emit progress messages.
+#' @param progress_updates Approximate number of progress messages to emit.
+#' @param buffer_bytes Flush threshold in bytes; must be one positive integer.
+#' @param progress_label Label used in the progress messages.
+#' @return Invisibly, a list with the normalized `path` and `rendered_nodes`.
+#' @section Side effects: Creates or overwrites `path`.
 write_physicell_lineage_newick <- function(nodes,
                                            path,
                                            terminal_physicell_ids = NULL,
@@ -662,6 +848,10 @@ write_physicell_lineage_newick <- function(nodes,
   token_buffer <- character(65536L)
   token_count <- 0L
   buffered_bytes <- 0L
+
+  #' Internal: write the buffered tokens and reset the buffer
+  #'
+  #' @return `NULL`, invisibly.
   flush_tokens <- function(){
     if(token_count == 0L){
       return(invisible(NULL))
@@ -676,6 +866,11 @@ write_physicell_lineage_newick <- function(nodes,
     buffered_bytes <<- 0L
     invisible(NULL)
   }
+
+  #' Internal: buffer one token, flushing once the byte budget is reached
+  #'
+  #' @param token One Newick token.
+  #' @return `NULL`, invisibly.
   emit_token <- function(token){
     token_count <<- token_count + 1L
     token_buffer[token_count] <<- token
@@ -704,6 +899,14 @@ write_physicell_lineage_newick <- function(nodes,
   ))
 }
 
+# ---- Barcode target layout and reference construction ----
+
+#' Split an integer total across weights by largest remainder
+#'
+#' @param total Non-negative integer to allocate.
+#' @param weights Non-negative finite weights with a positive sum; they are
+#'   normalized internally.
+#' @return Integer counts, one per weight, summing exactly to `total`.
 largest_remainder_counts <- function(total, weights){
   total <- as.integer(total)
   weights <- as.numeric(weights)
@@ -722,6 +925,21 @@ largest_remainder_counts <- function(total, weights){
   as.integer(counts)
 }
 
+#' Place recorder targets along the barcode and assign edit-rate classes
+#'
+#' Three layouts are read from `target_spec$config`: `U` spreads the targets
+#' uniformly, `R` samples positions without replacement, and `S:first:gap`
+#' places them at a fixed spacing. Class counts come from
+#' `largest_remainder_counts()` on the high/medium/low fractions and are then
+#' attached to a shuffled copy of the positions.
+#'
+#' @param target_spec One JSON target block with `num_targets`, `config`, and
+#'   `edit_rate_class_fractions`; `NULL` or a missing `num_targets` yields no
+#'   targets.
+#' @param barcode_length Barcode length in bases; `num_targets` may not exceed
+#'   it and a spaced layout may not run past it.
+#' @return A character vector of `High`/`Medium`/`Low` classes named by the
+#'   one-based target position.
 physicell_target_positions <- function(target_spec, barcode_length){
   if(is.null(target_spec) || is.null(target_spec$num_targets)){
     return(setNames(character(), character()))
@@ -770,6 +988,21 @@ physicell_target_positions <- function(target_spec, barcode_length){
   setNames(classes, as.character(shuffled))
 }
 
+#' Expand each target into its editing window
+#'
+#' Every position within `window_spec$size` bases of a target joins that
+#' target's window. With a decaying window the class drops one step inside the
+#' inner half of the window and two steps beyond it, and positions that decay
+#' below `Low` are excluded. Where windows overlap, the highest class wins.
+#'
+#' @param target_classes Named `High`/`Medium`/`Low` classes from
+#'   `physicell_target_positions()`.
+#' @param window_spec JSON editing-window block supplying `size` and `decaying`.
+#' @param barcode_sequence Barcode reference as a character vector of bases.
+#' @param same_base_only When `TRUE` (base editing), only window positions
+#'   carrying the same base as the target are eligible.
+#' @return A list with `classes`, the expanded named class vector, and
+#'   `windows`, the accepted positions per `be_window_<i>`/`nuc_window_<i>`.
 expand_physicell_target_windows <- function(target_classes,
                                             window_spec,
                                             barcode_sequence,
@@ -786,6 +1019,12 @@ expand_physicell_target_windows <- function(target_classes,
   expanded <- target_classes
   windows <- list()
 
+  #' Internal: decay an edit-rate class by its distance from the target
+  #'
+  #' @param edit_class `High`, `Medium`, or `Low`.
+  #' @param distance Absolute distance in bases from the target position.
+  #' @return The class unchanged for a non-decaying window, the decayed class
+  #'   otherwise, or `NA_character_` once it would fall below `Low`.
   lower_class <- function(edit_class, distance){
     class_index <- class_order[[edit_class]]
     if(!decaying || window_size == 0){
@@ -839,6 +1078,20 @@ expand_physicell_target_windows <- function(target_classes,
   list(classes = expanded, windows = windows)
 }
 
+#' Obtain the barcode reference sequence
+#'
+#' Reads `params$barcode_sequence` when one is configured (plain text or FASTA,
+#' resolved against `params_dir` unless the path is absolute). Otherwise it
+#' composes a random sequence whose base counts follow `bc_nuc_composition`,
+#' forcing the base-editor source base onto every BE target position and
+#' borrowing from the most abundant other base when the composition cannot
+#' supply enough of it.
+#'
+#' @param params Parsed JSON parameter list; `bc_length` fixes the length.
+#' @param be_positions Integer positions that must carry `be_from`.
+#' @param be_from Base-editor source base.
+#' @param params_dir Directory used to resolve a relative sequence path.
+#' @return A character vector of `A`/`G`/`C`/`T` of length `bc_length`.
 physicell_barcode_reference <- function(params,
                                         be_positions,
                                         be_from,
@@ -902,6 +1155,14 @@ physicell_barcode_reference <- function(params,
   sequence
 }
 
+# ---- Substitution models and per-position rate sets ----
+
+#' Coerce substitution-model parameters to a fixed-length numeric vector
+#'
+#' @param values Numeric vector, list, or one semicolon-delimited string.
+#' @param expected_length Number of parameters the model consumes.
+#' @return A numeric vector of exactly `expected_length` entries; absent values
+#'   stay `NA_real_` so the model can derive them.
 physicell_model_parameters <- function(values, expected_length){
   if(is.character(values) && length(values) == 1 && grepl(';', values, fixed = TRUE)){
     values <- strsplit(gsub('[[:space:]]+', '', values), ';', fixed = TRUE)[[1]]
@@ -922,11 +1183,30 @@ physicell_model_parameters <- function(values, expected_length){
   values[seq_len(expected_length)]
 }
 
+#' Build the barcode substitution-probability matrix for one model
+#'
+#' Supports `JC`, `K80`, `K81`, `F81`, `HKY`, and `GTR`. Equilibrium base
+#' frequencies are taken from the supplied sequence; `F81` and `HKY` rescale
+#' their off-diagonal entries so the mean off-diagonal rate matches the
+#' configured baseline.
+#'
+#' @param model_name Model label, matched case-insensitively.
+#' @param model_parameters Parameters in the layout
+#'   `physicell_model_parameters()` expects for that model.
+#' @param sequence Barcode reference used for the base frequencies.
+#' @return A 4-by-4 finite non-negative matrix with `A`, `G`, `C`, `T` dimnames
+#'   and a zero diagonal.
 physicell_substitution_matrix <- function(model_name, model_parameters, sequence){
   bases <- c('A', 'G', 'C', 'T')
   fractions <- as.numeric(table(factor(sequence, levels = bases))) / length(sequence)
   model_name <- toupper(as.character(model_name))
 
+  #' Internal: complete a ratio/transition/transversion triple
+  #'
+  #' @param parameters Three values ordered ratio, transition, transversion; at
+  #'   least two must be supplied.
+  #' @param model_label Model name used in the error messages.
+  #' @return A named vector with all three values filled in.
   derive_three <- function(parameters, model_label){
     ratio <- parameters[1]
     transition <- parameters[2]
@@ -1015,6 +1295,19 @@ physicell_substitution_matrix <- function(model_name, model_parameters, sequence
   result
 }
 
+#' Draw class-stratified per-target mutation probabilities
+#'
+#' Samples 1000 gamma variates with shape 0.5 and the requested mean, cuts them
+#' at the quantiles implied by the Low/Medium/High class proportions, and draws
+#' each target's rate from its own class bin, so higher classes receive the
+#' heavier tail. Falls back to the mean for every target when those quantiles
+#' are not distinct.
+#'
+#' @param target_classes Named `High`/`Medium`/`Low` classes; an empty vector
+#'   returns an empty result.
+#' @param mean_probability Mean per-division probability; must be one finite
+#'   non-negative value, and zero returns all-zero rates.
+#' @return A named numeric vector of probabilities capped just below one.
 draw_physicell_target_rates <- function(target_classes, mean_probability){
   if(length(target_classes) == 0){
     return(setNames(numeric(), character()))
@@ -1065,6 +1358,33 @@ draw_physicell_target_rates <- function(target_classes, mean_probability){
   pmin(rates, 1 - .Machine$double.eps)
 }
 
+#' Build the per-position event rates for one cell type and editing state
+#'
+#' Every non-target position gets the background substitution probabilities of
+#' its reference base plus the background insertion and deletion rates; target
+#' positions start empty and instead receive their drawn base-editing
+#' substitution rate and nuclease insertion/deletion rates. A random share of
+#' the remaining positions is then made invariant.
+#'
+#' @details Event names are `sub_<1-4>` for a substitution to `A`, `G`, `C`, or
+#'   `T`, plus `insertion` and `deletion`. The per-division probabilities are
+#'   converted to continuous-time hazards once here, and the totals, cumulative
+#'   event-selection probabilities, and single-event shortcuts are cached so
+#'   branch simulation never recomputes them.
+#'
+#' @param params Parsed JSON parameter list.
+#' @param cell_type Key into `params$cell_type_dict$cell_type_params`; the type
+#'   must carry a positive finite `cell_cycle_length`.
+#' @param editing_state Either `uninduced_editing_params` or
+#'   `induced_editing_params`.
+#' @param barcode_sequence Barcode reference as a character vector.
+#' @param be_classes Expanded base-editing target classes.
+#' @param nuc_classes Expanded nuclease target classes.
+#' @param be_to Base-editor destination base.
+#' @return A list with `probabilities`, `event_hazards`, `total_hazards`,
+#'   `event_cumulative_probabilities`, `single_event_names`,
+#'   `active_positions`, `active_position_names`, `cell_cycle_length`,
+#'   `substitution_matrix`, and `invariant_positions`.
 physicell_rate_set <- function(params,
                                cell_type,
                                editing_state,
@@ -1209,6 +1529,617 @@ physicell_rate_set <- function(params,
   )
 }
 
+# ---- PALINCODE recorder model ----
+
+#' Validate a PALINCODE probability as one value per cBit
+#'
+#' @param value Scalar probability, or one probability per cBit.
+#' @param number Number of cBits.
+#' @param name Configuration key used in the error message.
+#' @return A numeric vector of length `number` with every entry in `[0, 1]`.
+palincode_probability_vector <- function(value, number, name){
+  value <- suppressWarnings(as.numeric(unlist(value, use.names = FALSE)))
+  if(length(value) == 1L){
+    value <- rep(value, number)
+  }
+  if(length(value) != number || any(!is.finite(value)) ||
+     any(value < 0) || any(value > 1)){
+    stop(sprintf(
+      '%s must contain one probability or one per PALINCODE cBit.',
+      name
+    ))
+  }
+  value
+}
+
+#' Validate one configured count as an integer
+#'
+#' @param value Candidate count; must be a single finite whole number no larger
+#'   than `.Machine$integer.max`.
+#' @param name Configuration key used in the error message.
+#' @param allow_zero When `TRUE` zero is accepted, otherwise the value must be
+#'   positive.
+#' @return The value as an integer.
+palincode_positive_integer <- function(value, name, allow_zero = FALSE){
+  numeric_value <- suppressWarnings(as.numeric(value))
+  minimum <- if(allow_zero) 0L else 1L
+  if(length(numeric_value) != 1L || !is.finite(numeric_value) ||
+     numeric_value < minimum || numeric_value > .Machine$integer.max ||
+     numeric_value %% 1 != 0){
+    stop(sprintf(
+      '%s must be one %s integer.',
+      name,
+      if(allow_zero) 'non-negative' else 'positive'
+    ))
+  }
+  as.integer(numeric_value)
+}
+
+#' Draw unique static nucleotide identifiers for integrations
+#'
+#' Resamples until no two identifiers collide, after checking that
+#' `4^identifier_length` can accommodate `number` distinct strings.
+#'
+#' @param number Number of identifiers to draw; zero returns an empty vector.
+#' @param identifier_length Length in bases of each identifier.
+#' @return A character vector of `number` unique A/C/G/T strings.
+palincode_static_ids <- function(number, identifier_length){
+  if(number == 0L){
+    return(character())
+  }
+  if(log(number) > identifier_length * log(4) + 1e-12){
+    stop(paste(
+      'palincode_adapter.static_id_length is too short for unique',
+      'integrations.'
+    ))
+  }
+  repeat{
+    identifiers <- vapply(seq_len(number), function(index){
+      paste0(
+        sample(c('A', 'C', 'G', 'T'), identifier_length, TRUE),
+        collapse = ''
+      )
+    }, character(1))
+    if(!anyDuplicated(identifiers)){
+      return(identifiers)
+    }
+  }
+}
+
+#' Prepare a PALINCODE recording model
+#'
+#' Each integration carries `num_cbits_per_integration` cBits occupying barcode
+#' positions `1..num_cbits`, with any founder-label sites appended after them. A
+#' cBit edits at most once and resolves to `left`, `right`, or `both` in the
+#' configured proportions, encoded as `1`, `2`, and `3` against wild type `0`.
+#' The per-cell-cycle probabilities are converted to continuous-time hazards for
+#' the induced and uninduced states.
+#'
+#' @param params Parsed remote_mito parameter list; `palincode_adapter` holds
+#'   the recorder configuration and `physicell_adapter` the storage policy.
+#' @param cell_type Cell type whose `cell_cycle_length` scales the hazards;
+#'   defaults to the configured founder cell type.
+#' @param num_integrations Integrations per cell; defaults to the largest
+#'   `max_bc_ints_per_cell` option.
+#' @param founder_label_sites Extra positions appended for founder labels.
+#' @param seed Optional seed set before the static IDs are drawn.
+#' @return A prepared model list carrying `is_palincode = TRUE`, the barcode
+#'   geometry, `rate_sets` for both editing states, and a `palincode` block with
+#'   the cBit names, outcome fractions, static IDs, and state encoding.
+#' @section Side effects: Calls `set.seed()` when `seed` is supplied.
+prepare_palincode_recording_model <- function(params,
+                                               cell_type = NULL,
+                                               num_integrations = NULL,
+                                               founder_label_sites = 0,
+                                               seed = NULL){
+  configuration <- params$palincode_adapter
+  if(is.null(configuration)){
+    configuration <- list()
+  }
+  if(!is.list(configuration)){
+    stop('palincode_adapter must be a JSON object.')
+  }
+  if(!is.null(seed)){
+    set.seed(seed)
+  }
+  if(is.null(cell_type)){
+    cell_type <- as.character(params$cell_type_dict$founder_cell_type)
+  }
+  if(length(cell_type) != 1L || is.na(cell_type) || !nzchar(cell_type) ||
+     is.null(params$cell_type_dict$cell_type_params[[cell_type]])){
+    stop('PALINCODE requires one configured cell type.')
+  }
+  if(is.null(num_integrations)){
+    integration_options <- as.integer(unlist(
+      params$max_bc_ints_per_cell,
+      use.names = FALSE
+    ))
+    num_integrations <- max(integration_options)
+  }
+  num_integrations <- palincode_positive_integer(
+    num_integrations,
+    'num_integrations'
+  )
+  founder_label_sites <- palincode_positive_integer(
+    founder_label_sites,
+    'founder_label_sites',
+    allow_zero = TRUE
+  )
+  num_cbits <- palincode_positive_integer(
+    if(is.null(configuration$num_cbits_per_integration)){
+      2L
+    } else{
+      configuration$num_cbits_per_integration
+    },
+    'palincode_adapter.num_cbits_per_integration'
+  )
+  cbit_names <- configuration$cbit_names
+  if(is.null(cbit_names)){
+    width <- max(3L, nchar(num_cbits))
+    cbit_names <- paste0(
+      'cBit_',
+      formatC(seq_len(num_cbits), width = width, flag = '0')
+    )
+  } else{
+    cbit_names <- as.character(unlist(cbit_names, use.names = FALSE))
+  }
+  if(length(cbit_names) != num_cbits || anyNA(cbit_names) ||
+     any(!nzchar(cbit_names)) || anyDuplicated(cbit_names)){
+    stop('palincode_adapter.cbit_names must uniquely name every cBit.')
+  }
+
+  induced_source <- configuration$induced_edit_probability_per_cbit_per_cell_cycle
+  if(is.null(induced_source)){
+    induced_source <- configuration$edit_probability_per_cbit_per_cell_cycle
+  }
+  if(is.null(induced_source)){
+    induced_source <- 0.1
+  }
+  uninduced_source <-
+    configuration$uninduced_edit_probability_per_cbit_per_cell_cycle
+  if(is.null(uninduced_source)){
+    uninduced_source <- 0
+  }
+  induced_probabilities <- palincode_probability_vector(
+    induced_source,
+    num_cbits,
+    'palincode_adapter.induced_edit_probability_per_cbit_per_cell_cycle'
+  )
+  uninduced_probabilities <- palincode_probability_vector(
+    uninduced_source,
+    num_cbits,
+    'palincode_adapter.uninduced_edit_probability_per_cbit_per_cell_cycle'
+  )
+  left_fractions <- palincode_probability_vector(
+    if(is.null(configuration$left_edit_fraction)) 0.495 else
+      configuration$left_edit_fraction,
+    num_cbits,
+    'palincode_adapter.left_edit_fraction'
+  )
+  right_fractions <- palincode_probability_vector(
+    if(is.null(configuration$right_edit_fraction)) 0.495 else
+      configuration$right_edit_fraction,
+    num_cbits,
+    'palincode_adapter.right_edit_fraction'
+  )
+  both_fractions <- palincode_probability_vector(
+    if(is.null(configuration$both_edit_fraction)) 0.01 else
+      configuration$both_edit_fraction,
+    num_cbits,
+    'palincode_adapter.both_edit_fraction'
+  )
+  outcome_fractions <- cbind(
+    left = left_fractions,
+    right = right_fractions,
+    both = both_fractions
+  )
+  if(any(abs(rowSums(outcome_fractions) - 1) > 1e-8)){
+    stop(paste(
+      'PALINCODE left_edit_fraction, right_edit_fraction, and',
+      'both_edit_fraction must sum to one for every cBit.'
+    ))
+  }
+  outcome_fractions <- outcome_fractions / rowSums(outcome_fractions)
+
+  cell_cycle_length <- as.numeric(
+    params$cell_type_dict$cell_type_params[[cell_type]]$cell_cycle_length
+  )
+  if(length(cell_cycle_length) != 1L || is.na(cell_cycle_length) ||
+     cell_cycle_length <= 0){
+    stop('Every PALINCODE cell type needs a positive cell_cycle_length.')
+  }
+  barcode_length <- num_cbits + founder_label_sites
+  cbit_positions <- seq_len(num_cbits)
+  founder_label_positions <- if(founder_label_sites == 0L){
+    integer()
+  } else{
+    num_cbits + seq_len(founder_label_sites)
+  }
+
+  #' Internal: turn per-cBit probabilities into one PALINCODE rate set
+  #'
+  #' @param probabilities Per-cell-cycle edit probability for each cBit.
+  #' @return A list with `total_hazards`, `active_positions`,
+  #'   `active_position_names`, `outcome_fractions`, and `cell_cycle_length`.
+  make_rate_set <- function(probabilities){
+    hazards <- physicell_probability_hazard(
+      probabilities,
+      cell_cycle_length
+    )
+    names(hazards) <- as.character(cbit_positions)
+    list(
+      total_hazards = hazards,
+      active_positions = cbit_positions[hazards > 0],
+      active_position_names = as.character(cbit_positions[hazards > 0]),
+      outcome_fractions = outcome_fractions,
+      cell_cycle_length = cell_cycle_length
+    )
+  }
+
+  editing_induction_time <- suppressWarnings(as.numeric(
+    params$editing_induction$timepoint
+  ))
+  if(length(editing_induction_time) != 1L ||
+     !is.finite(editing_induction_time)){
+    editing_induction_time <- Inf
+  }
+  adapter <- params$physicell_adapter
+  if(is.null(adapter)){
+    adapter <- list()
+  }
+  profile_storage <- if(is.null(adapter$profile_storage)){
+    'sparse'
+  } else{
+    tolower(as.character(adapter$profile_storage))
+  }
+  if(length(profile_storage) != 1L ||
+     !(profile_storage %in% c('dense', 'sparse'))){
+    stop('physicell_adapter.profile_storage must be dense or sparse.')
+  }
+  compact_output <- if(is.null(adapter$compact_output)){
+    TRUE
+  } else{
+    isTRUE(adapter$compact_output)
+  }
+  retain_internal_profiles <- if(is.null(adapter$retain_internal_profiles)){
+    TRUE
+  } else{
+    isTRUE(adapter$retain_internal_profiles)
+  }
+  static_id_length <- palincode_positive_integer(
+    if(is.null(configuration$static_id_length)) 12L else
+      configuration$static_id_length,
+    'palincode_adapter.static_id_length'
+  )
+  integration_static_ids <- palincode_static_ids(
+    num_integrations,
+    static_id_length
+  )
+  target_classes <- setNames(rep('PALINCODE', num_cbits), cbit_positions)
+
+  list(
+    is_palincode = TRUE,
+    barcode_sequence = rep('A', barcode_length),
+    barcode_length = barcode_length,
+    num_integrations = num_integrations,
+    founder_label_sites = founder_label_sites,
+    founder_label_positions = founder_label_positions,
+    cell_type = cell_type,
+    be_from = 'A',
+    be_to = 'G',
+    be_targets = target_classes,
+    be_target_classes = target_classes,
+    nuc_target_classes = setNames(character(), character()),
+    windows = list(),
+    position_windows = setNames(
+      replicate(barcode_length, character(), simplify = FALSE),
+      as.character(seq_len(barcode_length))
+    ),
+    close_be_window = FALSE,
+    close_nuc_window = FALSE,
+    editing_induction_time = editing_induction_time,
+    recorder_system = 'PALINCODE',
+    profile_storage = profile_storage,
+    compact_output = compact_output,
+    retain_internal_profiles = retain_internal_profiles,
+    output_positions = seq_len(barcode_length),
+    rate_sets = list(
+      uninduced_editing_params = make_rate_set(uninduced_probabilities),
+      induced_editing_params = make_rate_set(induced_probabilities)
+    ),
+    palincode = list(
+      num_cbits_per_integration = num_cbits,
+      cbit_positions = cbit_positions,
+      cbit_names = cbit_names,
+      induced_edit_probabilities = induced_probabilities,
+      uninduced_edit_probabilities = uninduced_probabilities,
+      outcome_fractions = outcome_fractions,
+      static_id_length = static_id_length,
+      integration_static_ids = integration_static_ids,
+      state_encoding = c(wild_type = 0L, left = 1L, right = 2L, both = 3L)
+    )
+  )
+}
+
+# ---- Prime-editing recorder model ----
+
+#' Prepare a known-pegRNA prime-editing recording model
+#'
+#' Lays out the targets with `physicell_target_positions()` on the nuclease
+#' target block, hands them to `prepare_prime_editing_backend()` for pegRNA
+#' assignment, and scales each target's base per-cell-cycle probability by its
+#' pegRNA editing efficiency before converting to hazards. Every target edits at
+#' most once, to the locked state `1`.
+#'
+#' @param params Parsed remote_mito parameter list; `prime_editing_backend`
+#'   supplies the pool and the optional probability overrides.
+#' @param cell_type Cell type whose `cell_cycle_length` scales the hazards;
+#'   defaults to the configured founder cell type.
+#' @param num_integrations Integrations per cell; defaults to the largest
+#'   `max_bc_ints_per_cell` option.
+#' @param founder_label_sites Extra non-target positions reserved for founder
+#'   labels, taken from the lowest free positions.
+#' @param params_dir Directory used to resolve a relative pegRNA-pool path.
+#' @param seed Optional seed set before pool assignment and static-ID drawing.
+#' @return A prepared model list carrying `is_prime_editing = TRUE`, the barcode
+#'   geometry, `rate_sets` for both editing states, and a `prime_editing` block
+#'   holding the backend plus the base and effective probabilities.
+#' @section Side effects: Calls `set.seed()` when `seed` is supplied.
+#' @note Requires `prime_editing.R` to have been sourced first.
+prepare_prime_editing_recording_model <- function(params,
+                                                   cell_type = NULL,
+                                                   num_integrations = NULL,
+                                                   founder_label_sites = 0,
+                                                   params_dir = '.',
+                                                   seed = NULL){
+  if(!exists('prepare_prime_editing_backend', mode = 'function')){
+    stop('Source prime_editing.R before preparing a prime-editing model.')
+  }
+  if(!is.null(seed)){
+    set.seed(seed)
+  }
+  if(is.null(cell_type)){
+    cell_type <- as.character(params$cell_type_dict$founder_cell_type)
+  }
+  if(length(cell_type) != 1L || is.na(cell_type) || !nzchar(cell_type) ||
+     is.null(params$cell_type_dict$cell_type_params[[cell_type]])){
+    stop('Prime editing requires one configured cell type.')
+  }
+  if(is.null(num_integrations)){
+    integration_options <- as.integer(unlist(
+      params$max_bc_ints_per_cell,
+      use.names = FALSE
+    ))
+    num_integrations <- max(integration_options)
+  }
+  num_integrations <- palincode_positive_integer(
+    num_integrations,
+    'num_integrations'
+  )
+  founder_label_sites <- palincode_positive_integer(
+    founder_label_sites,
+    'founder_label_sites',
+    allow_zero = TRUE
+  )
+  barcode_length <- suppressWarnings(as.integer(params$bc_length))
+  if(length(barcode_length) != 1L || is.na(barcode_length) ||
+     barcode_length < 1L){
+    stop('bc_length must be one positive integer.')
+  }
+  nuc_targets <- physicell_target_positions(
+    params$nuclease_targets,
+    barcode_length
+  )
+  target_positions <- sort(as.integer(names(nuc_targets)))
+  if(length(target_positions) == 0L){
+    stop('Prime editing requires at least one configured nuclease target.')
+  }
+  backend <- prepare_prime_editing_backend(
+    params,
+    target_positions = target_positions,
+    params_dir = params_dir,
+    seed = seed
+  )
+  barcode_sequence <- physicell_barcode_reference(
+    params,
+    integer(),
+    'A',
+    params_dir
+  )
+  founder_label_positions <- head(
+    setdiff(seq_len(barcode_length), target_positions),
+    founder_label_sites
+  )
+  if(length(founder_label_positions) != founder_label_sites){
+    stop(sprintf(
+      'Only %d non-prime-editing positions are available for founder labels.',
+      length(setdiff(seq_len(barcode_length), target_positions))
+    ))
+  }
+
+  configuration <- params$prime_editing_backend
+  if(is.null(configuration)){
+    configuration <- list()
+  }
+  type_parameters <- params$cell_type_dict$cell_type_params[[cell_type]]
+
+  #' Internal: resolve one editing state's base per-cell-cycle probability
+  #'
+  #' @param state Either `induced_editing_params` or `uninduced_editing_params`.
+  #' @param fallback Value used when neither the backend override nor the cell
+  #'   type supplies one.
+  #' @return A validated probability vector with one entry per target position.
+  base_probability <- function(state, fallback){
+    override_name <- paste0(
+      if(state == 'induced_editing_params') 'induced' else 'uninduced',
+      '_edit_probability_per_cell_cycle'
+    )
+    value <- configuration[[override_name]]
+    if(is.null(value) && !is.null(type_parameters[[state]])){
+      value <- type_parameters[[state]]$nuc_insertions_per_target_per_division
+    }
+    if(is.null(value)){
+      value <- fallback
+    }
+    prime_editing_probability_vector(
+      value,
+      length(target_positions),
+      paste0('prime_editing_backend.', override_name)
+    )
+  }
+  induced_base <- base_probability('induced_editing_params', 0.1)
+  uninduced_base <- base_probability('uninduced_editing_params', 0)
+  induced_probabilities <- prime_editing_scale_probability(
+    induced_base,
+    backend$targets$editing_efficiency
+  )
+  uninduced_probabilities <- prime_editing_scale_probability(
+    uninduced_base,
+    backend$targets$editing_efficiency
+  )
+  cell_cycle_length <- suppressWarnings(as.numeric(
+    type_parameters$cell_cycle_length
+  ))
+  if(length(cell_cycle_length) != 1L || is.na(cell_cycle_length) ||
+     cell_cycle_length <= 0){
+    stop('Every prime-editing cell type needs a positive cell_cycle_length.')
+  }
+
+  #' Internal: turn per-target probabilities into one prime-editing rate set
+  #'
+  #' @param probabilities Effective per-cell-cycle probability per target.
+  #' @return A list with `total_hazards`, `active_positions`,
+  #'   `active_position_names`, and `cell_cycle_length`.
+  make_rate_set <- function(probabilities){
+    hazards <- physicell_probability_hazard(
+      probabilities,
+      cell_cycle_length
+    )
+    names(hazards) <- as.character(target_positions)
+    list(
+      total_hazards = hazards,
+      active_positions = target_positions[hazards > 0],
+      active_position_names = as.character(target_positions[hazards > 0]),
+      cell_cycle_length = cell_cycle_length
+    )
+  }
+  editing_induction_time <- suppressWarnings(as.numeric(
+    params$editing_induction$timepoint
+  ))
+  if(length(editing_induction_time) != 1L ||
+     !is.finite(editing_induction_time)){
+    editing_induction_time <- Inf
+  }
+  adapter <- params$physicell_adapter
+  if(is.null(adapter)){
+    adapter <- list()
+  }
+  profile_storage <- if(is.null(adapter$profile_storage)){
+    'sparse'
+  } else{
+    tolower(as.character(adapter$profile_storage))
+  }
+  if(length(profile_storage) != 1L ||
+     !(profile_storage %in% c('dense', 'sparse'))){
+    stop('physicell_adapter.profile_storage must be dense or sparse.')
+  }
+  compact_output <- if(is.null(adapter$compact_output)){
+    TRUE
+  } else{
+    isTRUE(adapter$compact_output)
+  }
+  retain_internal_profiles <- if(is.null(adapter$retain_internal_profiles)){
+    TRUE
+  } else{
+    isTRUE(adapter$retain_internal_profiles)
+  }
+  static_id_length <- palincode_positive_integer(
+    if(is.null(configuration$static_id_length)) 12L else
+      configuration$static_id_length,
+    'prime_editing_backend.static_id_length'
+  )
+  backend$integration_static_ids <- palincode_static_ids(
+    num_integrations,
+    static_id_length
+  )
+  backend$static_id_length <- static_id_length
+  backend$induced_base_probabilities <- induced_base
+  backend$uninduced_base_probabilities <- uninduced_base
+  backend$induced_effective_probabilities <- induced_probabilities
+  backend$uninduced_effective_probabilities <- uninduced_probabilities
+  target_classes <- setNames(
+    rep('prime_editing', length(target_positions)),
+    target_positions
+  )
+
+  list(
+    is_prime_editing = TRUE,
+    barcode_sequence = barcode_sequence,
+    barcode_length = barcode_length,
+    num_integrations = num_integrations,
+    founder_label_sites = founder_label_sites,
+    founder_label_positions = founder_label_positions,
+    cell_type = cell_type,
+    be_from = 'A',
+    be_to = 'G',
+    be_targets = setNames(character(), character()),
+    be_target_classes = setNames(character(), character()),
+    nuc_target_classes = target_classes,
+    windows = list(),
+    position_windows = setNames(
+      replicate(barcode_length, character(), simplify = FALSE),
+      as.character(seq_len(barcode_length))
+    ),
+    close_be_window = FALSE,
+    close_nuc_window = TRUE,
+    editing_induction_time = editing_induction_time,
+    recorder_system = if(is.null(adapter$recorder_system)){
+      'prime editing'
+    } else{
+      as.character(adapter$recorder_system)
+    },
+    profile_storage = profile_storage,
+    compact_output = compact_output,
+    retain_internal_profiles = retain_internal_profiles,
+    output_positions = sort(unique(c(
+      target_positions,
+      founder_label_positions
+    ))),
+    rate_sets = list(
+      uninduced_editing_params = make_rate_set(uninduced_probabilities),
+      induced_editing_params = make_rate_set(induced_probabilities)
+    ),
+    prime_editing = backend
+  )
+}
+
+# ---- Recording-model dispatch and barcode profile storage ----
+
+#' Prepare the barcode recording model for a PhysiCell replay
+#'
+#' Dispatches to the PALINCODE or prime-editing preparer when either recorder is
+#' configured, and otherwise builds the generic base-editor/nuclease barcode
+#' model: it lays out the BE and nuclease targets, loads or generates the
+#' reference, expands the editing windows, reserves founder-label positions
+#' among the non-recording sites, and builds both rate sets.
+#'
+#' @param params Parsed remote_mito JSON parameter list.
+#' @param cell_type Cell type supplying the rate parameters; defaults to the
+#'   configured founder cell type.
+#' @param num_integrations Integrations per cell; defaults to the largest
+#'   `max_bc_ints_per_cell` option.
+#' @param founder_label_sites Number of non-recording positions reserved to
+#'   encode the founder index; must fit within the barcode.
+#' @param params_dir Directory used to resolve relative paths in `params`.
+#' @param seed Optional seed set before target layout and reference generation.
+#' @return A prepared model list with the barcode reference and length, target
+#'   classes, editing windows and their closure flags, induction time, recorder
+#'   identity, storage and output policy, `output_positions`, and `rate_sets`.
+#' @section Side effects: Calls `set.seed()` when `seed` is supplied.
+#' @note PALINCODE and prime editing cannot both be enabled. A configured
+#'   `nuclease_targets$prime_editing_system` that does not activate the unified
+#'   backend only warns: the generic path then emits ordinary one-base insertion
+#'   alleles instead of replaying guide sequences.
 prepare_physicell_recording_model <- function(params,
                                               cell_type = NULL,
                                               num_integrations = NULL,
@@ -1217,6 +2148,46 @@ prepare_physicell_recording_model <- function(params,
                                               seed = NULL){
   if(!is.list(params)){
     stop('params must be the parsed remote_mito JSON parameter list.')
+  }
+  recorder_system <- params$physicell_adapter$recorder_system
+  palincode_configuration <- params$palincode_adapter
+  if(!is.null(palincode_configuration) && !is.list(palincode_configuration)){
+    stop('palincode_adapter must be a JSON object.')
+  }
+  palincode_enabled <-
+    (!is.null(palincode_configuration) &&
+       !identical(palincode_configuration$enabled, FALSE)) ||
+    (!is.null(recorder_system) &&
+       grepl('PALINCODE', as.character(recorder_system), ignore.case = TRUE))
+  prime_configuration_present <-
+    !is.null(params$prime_editing_backend) ||
+    isTRUE(params$nuclease_targets$prime_editing_system)
+  if(prime_configuration_present &&
+     !exists('prime_editing_enabled', mode = 'function')){
+    stop('Source prime_editing.R before preparing a prime-editing model.')
+  }
+  prime_enabled <- prime_configuration_present && prime_editing_enabled(params)
+  if(isTRUE(palincode_enabled) && isTRUE(prime_enabled)){
+    stop('PALINCODE and prime editing cannot share one barcode model.')
+  }
+  if(isTRUE(prime_enabled)){
+    return(prepare_prime_editing_recording_model(
+      params,
+      cell_type = cell_type,
+      num_integrations = num_integrations,
+      founder_label_sites = founder_label_sites,
+      params_dir = params_dir,
+      seed = seed
+    ))
+  }
+  if(isTRUE(palincode_enabled)){
+    return(prepare_palincode_recording_model(
+      params,
+      cell_type = cell_type,
+      num_integrations = num_integrations,
+      founder_label_sites = founder_label_sites,
+      seed = seed
+    ))
   }
   if(!is.null(seed)){
     set.seed(seed)
@@ -1408,6 +2379,12 @@ prepare_physicell_recording_model <- function(params,
   )
 }
 
+#' Create an empty barcode profile in the model's storage representation
+#'
+#' @param model Prepared recording model; `profile_storage` selects the form.
+#' @return Either a `num_integrations`-by-`barcode_length` numeric matrix of
+#'   zeros, or a `physicell_sparse_barcode` list holding one position-named
+#'   numeric vector of edited sites per integration.
 initialize_physicell_barcode_profile <- function(model){
   if(identical(model$profile_storage, 'sparse')){
     return(structure(
@@ -1426,6 +2403,13 @@ initialize_physicell_barcode_profile <- function(model){
   )
 }
 
+#' Read one encoded allele out of a barcode profile
+#'
+#' @param profile Dense matrix or `physicell_sparse_barcode` list.
+#' @param integration Integration index.
+#' @param position Barcode position.
+#' @return The encoded allele, or `0` (reference) when a sparse profile holds no
+#'   entry there.
 physicell_barcode_value <- function(profile, integration, position){
   if(inherits(profile, 'physicell_sparse_barcode')){
     value <- profile[[integration]][as.character(position)]
@@ -1437,6 +2421,13 @@ physicell_barcode_value <- function(profile, integration, position){
   profile[integration, position]
 }
 
+#' Write one encoded allele into a barcode profile
+#'
+#' @param profile Dense matrix or `physicell_sparse_barcode` list.
+#' @param integration Integration index.
+#' @param position Barcode position.
+#' @param value Encoded allele.
+#' @return The updated profile, in the representation it arrived in.
 set_physicell_barcode_value <- function(profile,
                                         integration,
                                         position,
@@ -1449,6 +2440,12 @@ set_physicell_barcode_value <- function(profile,
   profile
 }
 
+#' Report whether an editing window already carries an edit
+#'
+#' @param profile Dense matrix or `physicell_sparse_barcode` list.
+#' @param integration Integration index.
+#' @param positions Barcode positions making up the editing window.
+#' @return `TRUE` when any of those positions differs from reference.
 physicell_barcode_window_edited <- function(profile,
                                             integration,
                                             positions){
@@ -1460,6 +2457,20 @@ physicell_barcode_window_edited <- function(profile,
   any(profile[integration, positions] != 0)
 }
 
+#' Stamp a founder's identity into a fresh barcode profile
+#'
+#' Writes `founder_index - 1` in binary across the model's founder-label
+#' positions on integration 1, with the low bit at the first label position. A
+#' `0` bit and a `1` bit are stored as the first and second non-reference base
+#' at that position, so the label can be read back from the allele alone.
+#'
+#' @param model Prepared recording model.
+#' @param founder_index One-based rank of this founder; must lie within
+#'   `num_founders`.
+#' @param num_founders Total number of founders; `ceiling(log2())` of it may not
+#'   exceed the configured label-site count.
+#' @return A list with `profile` and an `events` data frame of
+#'   `founder_barcode` records, empty when no label sites are configured.
 initialize_physicell_founder_barcode <- function(model,
                                                   founder_index,
                                                   num_founders){
@@ -1531,6 +2542,17 @@ initialize_physicell_founder_barcode <- function(model,
   list(profile = profile, events = do.call(rbind, events))
 }
 
+# ---- Hazards, selection coefficients, and progress logging ----
+
+#' Convert per-division probabilities to continuous-time hazards
+#'
+#' Uses `-log(1 - p) / cell_cycle_length`, so a branch of exactly one cell cycle
+#' reproduces the configured per-division probability.
+#'
+#' @param probability Probabilities, optionally named; values are clamped into
+#'   `[0, 1)`.
+#' @param cell_cycle_length Cell-cycle duration in simulation time units.
+#' @return Hazards per unit time, keeping the input names.
 physicell_probability_hazard <- function(probability, cell_cycle_length){
   probability_names <- names(probability)
   probability <- pmin(pmax(as.numeric(probability), 0), 1 - .Machine$double.eps)
@@ -1539,6 +2561,57 @@ physicell_probability_hazard <- function(probability, cell_cycle_length){
   hazards
 }
 
+#' Resolve the non-Mendelian selection coefficient
+#'
+#' @param params Parsed remote_mito parameter list.
+#' @param marker Optional key inside `non_mendelian_selection` that overrides
+#'   the global coefficient; must be one non-empty string when supplied.
+#' @param default Value used when neither the marker key nor
+#'   `non_mendelian_selection.coefficient` is present.
+#' @return One coefficient validated to lie in `[0, 1]`.
+non_mendelian_selection_coefficient <- function(params,
+                                                 marker = NULL,
+                                                 default = 0){
+  if(!is.list(params)){
+    stop('params must be a parsed remote_mito parameter list.')
+  }
+  configuration <- params$non_mendelian_selection
+  if(is.null(configuration)){
+    configuration <- list()
+  }
+  if(!is.list(configuration)){
+    stop('non_mendelian_selection must be a JSON object.')
+  }
+  marker <- if(is.null(marker)) NULL else as.character(marker)
+  if(!is.null(marker) &&
+     (length(marker) != 1L || is.na(marker) || !nzchar(marker))){
+    stop('marker must be NULL or one non-empty configuration key.')
+  }
+  value <- if(!is.null(marker) && !is.null(configuration[[marker]])){
+    configuration[[marker]]
+  } else if(!is.null(configuration$coefficient)){
+    configuration$coefficient
+  } else{
+    default
+  }
+  value <- suppressWarnings(as.numeric(value))
+  coefficient_name <- if(is.null(marker)){
+    'non_mendelian_selection.coefficient'
+  } else{
+    paste0('non_mendelian_selection.', marker)
+  }
+  if(length(value) != 1L || !is.finite(value) || value < 0 || value > 1){
+    stop(sprintf('%s must be one selection coefficient in [0, 1].',
+                 coefficient_name))
+  }
+  value
+}
+
+#' Format an elapsed or remaining duration for progress messages
+#'
+#' @param seconds One non-negative finite number of seconds.
+#' @return `"unknown"` for anything else, otherwise seconds, minutes and
+#'   seconds, or hours and minutes.
 format_physicell_progress_duration <- function(seconds){
   if(length(seconds) != 1 || !is.finite(seconds) || seconds < 0){
     return('unknown')
@@ -1556,6 +2629,12 @@ format_physicell_progress_duration <- function(seconds){
   )
 }
 
+#' Emit one timestamped stage message
+#'
+#' @param message_text One non-empty string.
+#' @param enabled When `FALSE`, nothing is printed.
+#' @return Invisibly, whether the message was emitted.
+#' @section Side effects: Writes to the message connection.
 physicell_log_stage <- function(message_text, enabled = TRUE){
   message_text <- as.character(message_text)
   if(length(message_text) != 1 || is.na(message_text) ||
@@ -1572,6 +2651,21 @@ physicell_log_stage <- function(message_text, enabled = TRUE){
   invisible(isTRUE(enabled))
 }
 
+#' Create a throttled progress reporter
+#'
+#' Precomputes evenly spaced completion checkpoints and returns a closure that
+#' prints only when one is crossed, reporting the count, percentage, elapsed
+#' time, throughput, and ETA against the wall clock captured at construction.
+#'
+#' @param total Total units of work; must be one positive integer.
+#' @param label Phase name shown in every message.
+#' @param enabled When `FALSE`, the closure still validates its argument but
+#'   prints nothing.
+#' @param updates Approximate number of messages to emit, capped at `total`.
+#' @param unit Noun used for the work units, such as `nodes` or `events`.
+#' @return A function of the completed count, which must lie in `[0, total]`,
+#'   returning invisibly whether it printed.
+#' @section Side effects: The returned closure writes to the message connection.
 new_physicell_progress_reporter <- function(total,
                                             label,
                                             enabled = FALSE,
@@ -1664,6 +2758,12 @@ new_physicell_progress_reporter <- function(total,
   }
 }
 
+# ---- Branch-segment mutation simulation ----
+
+#' Build the empty core barcode-event table
+#'
+#' @return A zero-row data frame with the columns `integration`, `position`,
+#'   `event`, `reference`, `alternate`, `allele`, and `event_time`.
 empty_physicell_barcode_events <- function(){
   data.frame(
     integration = integer(),
@@ -1677,6 +2777,16 @@ empty_physicell_barcode_events <- function(){
   )
 }
 
+#' Choose which event fires at each mutated position
+#'
+#' Positions whose rate set offers a single event are resolved straight from the
+#' cached `single_event_names`; the rest draw one uniform and index into that
+#' position's cached cumulative hazard-share vector.
+#'
+#' @param positions Barcode positions that mutated on this segment.
+#' @param rate_set Prepared rate set carrying the per-position event caches.
+#' @return A character vector of event names, one per position, drawn from
+#'   `sub_1`-`sub_4`, `insertion`, and `deletion`.
 select_physicell_position_events <- function(positions, rate_set){
   selected_events <- unname(rate_set$single_event_names[positions])
   multiple_event_indices <- which(is.na(selected_events))
@@ -1697,6 +2807,16 @@ select_physicell_position_events <- function(positions, rate_set){
   selected_events
 }
 
+#' Turn selected event names into encoded alleles
+#'
+#' A substitution keeps its destination base index (`1`-`4` for `A`, `G`, `C`,
+#' `T`), a deletion encodes as `-1`, and an insertion draws a uniform base and
+#' encodes as that base index divided by ten.
+#'
+#' @param selected_events Event names from
+#'   `select_physicell_position_events()`; anything else raises an error.
+#' @return A list with `event` (`substitution`, `deletion`, or `insertion`),
+#'   `alternate` (the destination base, `-`, or `+<base>`), and `allele`.
 decode_physicell_barcode_events <- function(selected_events){
   bases <- c('A', 'G', 'C', 'T')
   substitution <- grepl('^sub_[1-4]$', selected_events)
@@ -1743,11 +2863,249 @@ decode_physicell_barcode_events <- function(selected_events){
   )
 }
 
+#' Apply prime-editing hazards over one branch segment
+#'
+#' For each integration only the still-unedited target positions compete. One
+#' uniform per position both decides whether that target fires within `duration`
+#' and, by inverting the exponential CDF, fixes the exact time it fired. An
+#' edited target locks at state `1` and reports its assigned pegRNA's programmed
+#' sequence.
+#'
+#' @param profile Inherited profile, dense or sparse.
+#' @param duration Length of the segment; a non-positive value is a no-op.
+#' @param rate_set Prime-editing rate set with `total_hazards` named by target
+#'   position.
+#' @param model Prepared prime-editing model.
+#' @param segment_start Absolute time at which the segment begins, added to the
+#'   sampled waiting times.
+#' @return A list with the updated `profile` and an `events` table whose
+#'   `alternate` column holds the exact edited sequence.
+mutate_prime_editing_segment <- function(profile,
+                                         duration,
+                                         rate_set,
+                                         model,
+                                         segment_start = 0){
+  if(duration <= 0 || length(rate_set$active_positions) == 0L){
+    return(list(
+      profile = profile,
+      events = empty_physicell_barcode_events()
+    ))
+  }
+  active_positions <- rate_set$active_positions
+  active_position_names <- as.character(active_positions)
+  target_rows <- match(
+    active_positions,
+    model$prime_editing$targets$target_position
+  )
+  if(anyNA(target_rows)){
+    stop('A prime-editing rate position has no assigned pegRNA.')
+  }
+  target_by_position <- setNames(
+    target_rows,
+    active_position_names
+  )
+  event_chunks <- vector('list', model$num_integrations)
+  event_chunk_count <- 0L
+
+  for(integration in seq_len(model$num_integrations)){
+    if(inherits(profile, 'physicell_sparse_barcode')){
+      edited_positions <- names(profile[[integration]])
+      unedited <- if(length(edited_positions) == 0L){
+        rep.int(TRUE, length(active_positions))
+      } else{
+        is.na(match(active_position_names, edited_positions))
+      }
+    } else{
+      unedited <- profile[integration, active_positions] == 0
+    }
+    candidate_positions <- active_positions[unedited]
+    if(length(candidate_positions) == 0L){
+      next
+    }
+    hazards <- rate_set$total_hazards[as.character(candidate_positions)]
+    mutation_draws <- stats::runif(length(candidate_positions))
+    mutated <- mutation_draws < -expm1(-hazards * duration)
+    if(!any(mutated)){
+      next
+    }
+    mutated_positions <- candidate_positions[mutated]
+    mutated_hazards <- hazards[mutated]
+    event_times <- segment_start -
+      log1p(-mutation_draws[mutated]) / mutated_hazards
+    if(inherits(profile, 'physicell_sparse_barcode')){
+      new_values <- rep.int(1, length(mutated_positions))
+      names(new_values) <- as.character(mutated_positions)
+      profile[[integration]][names(new_values)] <- new_values
+    } else{
+      profile[integration, mutated_positions] <- 1
+    }
+    assignment_rows <- unname(
+      target_by_position[as.character(mutated_positions)]
+    )
+    assignments <- model$prime_editing$targets[
+      assignment_rows,
+      ,
+      drop = FALSE
+    ]
+    event_chunk_count <- event_chunk_count + 1L
+    event_chunks[[event_chunk_count]] <- data.frame(
+      integration = rep.int(integration, length(mutated_positions)),
+      position = mutated_positions,
+      event = rep.int('prime_edit', length(mutated_positions)),
+      reference = rep.int('unedited', length(mutated_positions)),
+      alternate = assignments$edit_sequence,
+      allele = rep.int(1, length(mutated_positions)),
+      event_time = event_times,
+      stringsAsFactors = FALSE
+    )
+  }
+  events <- if(event_chunk_count == 0L){
+    empty_physicell_barcode_events()
+  } else if(event_chunk_count == 1L){
+    event_chunks[[1L]]
+  } else{
+    do.call(rbind, event_chunks[seq_len(event_chunk_count)])
+  }
+  list(profile = profile, events = events)
+}
+
+#' Apply PALINCODE hazards over one branch segment
+#'
+#' Each still-wild-type cBit competes with one uniform that both decides whether
+#' it fires within `duration` and fixes the exact event time. A second uniform
+#' resolves the outcome against that cBit's left/right/both fractions, and the
+#' resulting state (`1`, `2`, or `3`) is locked in.
+#'
+#' @param profile Inherited profile, dense or sparse.
+#' @param duration Length of the segment; a non-positive value is a no-op.
+#' @param rate_set PALINCODE rate set with `total_hazards` and
+#'   `outcome_fractions` indexed by cBit position.
+#' @param model Prepared PALINCODE model.
+#' @param segment_start Absolute time at which the segment begins.
+#' @return A list with the updated `profile` and an `events` table whose `event`
+#'   column is `palincode_left`, `palincode_right`, or `palincode_both`.
+mutate_palincode_segment <- function(profile,
+                                     duration,
+                                     rate_set,
+                                     model,
+                                     segment_start = 0){
+  if(duration <= 0 || length(rate_set$active_positions) == 0L){
+    return(list(
+      profile = profile,
+      events = empty_physicell_barcode_events()
+    ))
+  }
+  active_positions <- rate_set$active_positions
+  active_position_names <- as.character(active_positions)
+  event_chunks <- vector('list', model$num_integrations)
+  event_chunk_count <- 0L
+  outcome_names <- c('left', 'right', 'both')
+
+  for(integration in seq_len(model$num_integrations)){
+    if(inherits(profile, 'physicell_sparse_barcode')){
+      edited_positions <- names(profile[[integration]])
+      unedited <- if(length(edited_positions) == 0L){
+        rep.int(TRUE, length(active_positions))
+      } else{
+        is.na(match(active_position_names, edited_positions))
+      }
+    } else{
+      unedited <- profile[integration, active_positions] == 0
+    }
+    candidate_positions <- active_positions[unedited]
+    if(length(candidate_positions) == 0L){
+      next
+    }
+    hazards <- rate_set$total_hazards[candidate_positions]
+    mutation_draws <- stats::runif(length(candidate_positions))
+    mutated <- mutation_draws < -expm1(-hazards * duration)
+    if(!any(mutated)){
+      next
+    }
+    mutated_positions <- candidate_positions[mutated]
+    mutated_hazards <- hazards[mutated]
+    event_times <- segment_start -
+      log1p(-mutation_draws[mutated]) / mutated_hazards
+    outcome_draws <- stats::runif(length(mutated_positions))
+    outcome_rows <- rate_set$outcome_fractions[mutated_positions, , drop = FALSE]
+    outcome_states <- 1L +
+      as.integer(outcome_draws > outcome_rows[, 'left']) +
+      as.integer(
+        outcome_draws > outcome_rows[, 'left'] + outcome_rows[, 'right']
+      )
+    if(inherits(profile, 'physicell_sparse_barcode')){
+      new_values <- as.numeric(outcome_states)
+      names(new_values) <- as.character(mutated_positions)
+      profile[[integration]][names(new_values)] <- new_values
+    } else{
+      profile[integration, mutated_positions] <- outcome_states
+    }
+    outcomes <- outcome_names[outcome_states]
+    event_chunk_count <- event_chunk_count + 1L
+    event_chunks[[event_chunk_count]] <- data.frame(
+      integration = rep.int(integration, length(mutated_positions)),
+      position = mutated_positions,
+      event = paste0('palincode_', outcomes),
+      reference = rep.int('wild_type', length(mutated_positions)),
+      alternate = outcomes,
+      allele = as.numeric(outcome_states),
+      event_time = event_times,
+      stringsAsFactors = FALSE
+    )
+  }
+
+  events <- if(event_chunk_count == 0L){
+    empty_physicell_barcode_events()
+  } else if(event_chunk_count == 1L){
+    event_chunks[[1L]]
+  } else{
+    do.call(rbind, event_chunks[seq_len(event_chunk_count)])
+  }
+  list(profile = profile, events = events)
+}
+
+#' Apply barcode mutation over one constant-rate branch segment
+#'
+#' Delegates to the prime-editing or PALINCODE mutator when the model is one of
+#' those recorders. Otherwise already-edited positions are skipped (recording is
+#' irreversible) and the remaining active positions are drawn together: one
+#' uniform per position decides whether it mutates within `duration` and fixes
+#' the exact event time, then the event types are selected and decoded in a
+#' batch and written back in one update. Hazard caches missing from an older
+#' rate set are rebuilt here from `rate_set$probabilities`.
+#'
+#' @param profile Inherited profile, dense or sparse.
+#' @param duration Length of the segment; a non-positive value is a no-op.
+#' @param rate_set Rate set for this segment's editing state.
+#' @param model Prepared recording model.
+#' @param segment_start Absolute time at which the segment begins.
+#' @return A list with the updated `profile` and an `events` table.
+#' @note When either editing window closes after an edit, the vectorized path
+#'   cannot be used: positions are then visited one at a time in random order so
+#'   an earlier edit can close its window against the later ones.
 mutate_physicell_barcode_segment <- function(profile,
                                              duration,
                                              rate_set,
                                              model,
                                              segment_start = 0){
+  if(isTRUE(model$is_prime_editing)){
+    return(mutate_prime_editing_segment(
+      profile,
+      duration = duration,
+      rate_set = rate_set,
+      model = model,
+      segment_start = segment_start
+    ))
+  }
+  if(isTRUE(model$is_palincode)){
+    return(mutate_palincode_segment(
+      profile,
+      duration = duration,
+      rate_set = rate_set,
+      model = model,
+      segment_start = segment_start
+    ))
+  }
   if(duration <= 0){
     return(list(
       profile = profile,
@@ -1990,6 +3348,21 @@ mutate_physicell_barcode_segment <- function(profile,
   list(profile = profile, events = events)
 }
 
+#' Mutate one branch, splitting it at editing induction
+#'
+#' A branch that straddles the model's global induction time is simulated as an
+#' uninduced segment followed by an induced one; otherwise it is a single
+#' segment.
+#'
+#' @param profile Inherited profile.
+#' @param start_time Branch start in simulation time.
+#' @param end_time Branch end in simulation time.
+#' @param model Prepared recording model supplying `editing_induction_time` and
+#'   both rate sets.
+#' @param editing_state `auto` to split at the induction time, or `induced` /
+#'   `uninduced` to force one state across the whole branch.
+#' @return A list with the updated `profile` and an `events` table carrying
+#'   `segment_start`, `segment_end`, and `editing_state` provenance columns.
 mutate_physicell_barcode_branch <- function(profile,
                                             start_time,
                                             end_time,
@@ -2060,6 +3433,34 @@ mutate_physicell_barcode_branch <- function(profile,
   list(profile = profile, events = events)
 }
 
+# ---- Lineage replay ----
+
+#' Replay barcode recording along an imported PhysiCell lineage
+#'
+#' Walks the node table in order - parents precede their children, so a parent's
+#' profile is always available - initializing founder profiles and mutating each
+#' branch from the profile it inherited. Mutation events accumulate in
+#' preallocated typed vectors that grow geometrically and are turned into one
+#' data frame at the end, sorted by event time.
+#'
+#' @param nodes Event-resolved lineage node table; needs `node_id`,
+#'   `physicell_id`, `parent_node_id`, `birth_time`, `end_time`, and
+#'   `is_terminal`, and may also carry `cell_type` and `editing_state` columns.
+#' @param model One prepared recording model, or a named collection of them
+#'   keyed by cell type, which requires a `cell_type` column on `nodes`.
+#' @param editing_state Default branch policy: `auto`, `induced`, or
+#'   `uninduced`; a per-node `editing_state` column overrides it.
+#' @param terminal_physicell_ids Optional live-cell IDs forming the sampled
+#'   terminal set; each must be terminal in the lineage.
+#' @param seed Seed set before the simulation begins.
+#' @param show_progress Whether to emit progress messages.
+#' @param progress_updates Approximate number of progress messages to emit.
+#' @return A list with `nodes`, `profiles` keyed by node ID, `terminal_nodes`,
+#'   `mutation_events`, `editing_state`, and `seed`.
+#' @section Side effects: Calls `set.seed(seed)`.
+#' @note When the model does not retain internal profiles, a parent's profile is
+#'   released as soon as its last child has been simulated, so `profiles` then
+#'   holds only the leaves and any still-pending branches.
 simulate_recording_on_physicell_lineage <- function(nodes,
                                                     model,
                                                     editing_state = 'auto',
@@ -2072,6 +3473,40 @@ simulate_recording_on_physicell_lineage <- function(nodes,
     'end_time', 'is_terminal'
   ) %in% names(nodes))){
     stop('nodes is not a valid PhysiCell lineage node table.')
+  }
+  model_is_collection <- is.null(model$barcode_length)
+  if(model_is_collection){
+    if(length(model) == 0 || is.null(names(model)) ||
+       any(!nzchar(names(model))) ||
+       any(vapply(model, function(value) is.null(value$barcode_length), logical(1)))){
+      stop('A barcode model collection must contain named prepared models.')
+    }
+    if(!('cell_type' %in% names(nodes))){
+      stop('Lineage nodes need a cell_type column when using model collections.')
+    }
+    missing_models <- setdiff(unique(as.character(nodes$cell_type)), names(model))
+    if(length(missing_models) > 0){
+      stop(sprintf(
+        'No barcode recording model is available for cell type(s): %s.',
+        paste(missing_models, collapse = ', ')
+      ))
+    }
+    output_model <- model[[1]]
+  } else{
+    output_model <- model
+  }
+
+  #' Internal: pick the recording model that applies to one node
+  #'
+  #' @param node One-row slice of the node table.
+  #' @return The single prepared model, or the collection entry matching that
+  #'   node's `cell_type`.
+  node_model <- function(node){
+    if(model_is_collection){
+      model[[as.character(node$cell_type)]]
+    } else{
+      model
+    }
   }
   set.seed(seed)
   profiles <- list()
@@ -2092,6 +3527,12 @@ simulate_recording_on_physicell_lineage <- function(nodes,
   event_parent_node_id <- rep(NA_character_, event_capacity)
   event_branch_start <- numeric(event_capacity)
   event_branch_end <- numeric(event_capacity)
+
+  #' Internal: grow every typed event column to hold more events
+  #'
+  #' @param required_capacity Number of event rows that must fit.
+  #' @return `NULL`, invisibly; each round lengthens the enclosing event vectors
+  #'   by at least half again.
   grow_event_buffer <- function(required_capacity){
     if(required_capacity <= event_capacity){
       return(invisible(NULL))
@@ -2124,6 +3565,16 @@ simulate_recording_on_physicell_lineage <- function(nodes,
     event_capacity <<- new_capacity
     invisible(NULL)
   }
+
+  #' Internal: copy one branch's events into the preallocated columns
+  #'
+  #' @param events Event table from `mutate_physicell_barcode_branch()`.
+  #' @param node_id Node the events belong to.
+  #' @param physicell_id_value PhysiCell ID of that node.
+  #' @param parent_node_id Parent node ID, or `NA` for a founder.
+  #' @param branch_start Branch start time.
+  #' @param branch_end Branch end time.
+  #' @return `NULL`, invisibly; `event_count` advances by `nrow(events)`.
   append_barcode_events <- function(events,
                                     node_id,
                                     physicell_id_value,
@@ -2166,10 +3617,10 @@ simulate_recording_on_physicell_lineage <- function(nodes,
   )
   report_progress <- new_physicell_progress_reporter(
     total = nrow(nodes),
-    label = if(is.null(model$recorder_system)){
+    label = if(is.null(output_model$recorder_system)){
       'barcode lineage recording'
     } else{
-      model$recorder_system
+      output_model$recorder_system
     },
     enabled = show_progress,
     updates = progress_updates
@@ -2178,10 +3629,11 @@ simulate_recording_on_physicell_lineage <- function(nodes,
 
   for(node_index in seq_len(nrow(nodes))){
     node <- nodes[node_index, , drop = FALSE]
+    branch_model <- node_model(node)
     if(is.na(node$parent_node_id)){
       founder_number <- founder_number + 1L
       initialized <- initialize_physicell_founder_barcode(
-        model,
+        branch_model,
         founder_index = founder_number,
         num_founders = length(root_indices)
       )
@@ -2212,18 +3664,23 @@ simulate_recording_on_physicell_lineage <- function(nodes,
       }
       remaining_children[parent_node_id] <-
         remaining_children[parent_node_id] - 1L
-      if(!isTRUE(model$retain_internal_profiles) &&
+      if(!isTRUE(output_model$retain_internal_profiles) &&
          remaining_children[parent_node_id] <= 0){
         profiles[[parent_node_id]] <- NULL
       }
     }
 
+    branch_editing_state <- if('editing_state' %in% names(nodes)){
+      as.character(node$editing_state)
+    } else{
+      editing_state
+    }
     mutation <- mutate_physicell_barcode_branch(
       start_profile,
       node$birth_time,
       node$end_time,
-      model,
-      editing_state
+      branch_model,
+      branch_editing_state
     )
     profiles[[node$node_id]] <- mutation$profile
     if(nrow(mutation$events) > 0){
@@ -2339,6 +3796,23 @@ simulate_recording_on_physicell_lineage <- function(nodes,
   )
 }
 
+# ---- Descendant intervals and event-inheritance matrices ----
+
+#' Order the sampled cells depth-first and index each node's descendants
+#'
+#' One iterative depth-first pass numbers the sampled terminal cells in
+#' traversal order, which makes every node's sampled descendants a contiguous
+#' run of that ordering. Recording `[start, end]` per node then answers "which
+#' sampled cells inherit an event on this branch" in constant time.
+#'
+#' @param nodes Lineage node table with unique `node_id` and `parent_node_id`,
+#'   ordered so every parent precedes its children.
+#' @param terminal_nodes Sampled terminal rows with unique `node_id` and
+#'   `physicell_id`; all must be reachable from a root.
+#' @return A list with `descendant_start`, `descendant_end`, and
+#'   `descendant_count` (one entry per node), `terminal_order` (rows of
+#'   `terminal_nodes` in traversal order), and `sample_ids` (`cell_<id>` in that
+#'   same order).
 physicell_terminal_descendant_intervals <- function(nodes, terminal_nodes){
   required_node_columns <- c('node_id', 'parent_node_id')
   required_terminal_columns <- c('node_id', 'physicell_id')
@@ -2397,6 +3871,11 @@ physicell_terminal_descendant_intervals <- function(nodes, terminal_nodes){
   terminal_count <- 0L
   stack <- integer(max(2L * num_nodes, 1L))
   stack_top <- 0L
+
+  #' Internal: push one traversal event onto the explicit stack
+  #'
+  #' @param node_event Node index to visit, or its negation to close that node.
+  #' @return Called for its effect on the enclosing `stack` and `stack_top`.
   push_node <- function(node_event){
     stack_top <<- stack_top + 1L
     stack[stack_top] <<- node_event
@@ -2451,6 +3930,25 @@ physicell_terminal_descendant_intervals <- function(nodes, terminal_nodes){
   )
 }
 
+#' Build the sparse cell-by-event inheritance matrix
+#'
+#' A mutation event is inherited by exactly the sampled cells descending from
+#' the node it occurred on, which the depth-first intervals make a contiguous
+#' block of rows. The `dgCMatrix` is therefore assembled directly from its
+#' column pointers and row indices, without materializing triplets.
+#'
+#' @param nodes Lineage node table.
+#' @param terminal_nodes Sampled terminal rows; these become the matrix rows.
+#' @param mutation_events Event table containing a `node_id` column; these
+#'   become the matrix columns.
+#' @param event_ids Optional unique column names; generated as
+#'   `mutation_event_<n>` when `NULL`.
+#' @param show_progress Whether to emit progress messages.
+#' @param progress_updates Approximate number of progress messages to emit.
+#' @return A list with `matrix` (a `dgCMatrix` of ones), `descendant_counts` per
+#'   event, and `terminal_order`.
+#' @note Requires the `Matrix` package, and errors when the nonzero count would
+#'   exceed the sparse integer-index limit.
 physicell_event_descendant_matrix <- function(nodes,
                                               terminal_nodes,
                                               mutation_events,
@@ -2561,6 +4059,24 @@ physicell_event_descendant_matrix <- function(nodes,
   )
 }
 
+#' Write the combined event-inheritance matrix and its manifest
+#'
+#' Prefixes each modality's events with `event_id`, `modality`, and
+#' `modality_event_row`, unions the column sets across modalities so they can be
+#' row-bound, then builds one matrix spanning all the events together.
+#'
+#' @param nodes Lineage node table.
+#' @param terminal_nodes Sampled terminal rows.
+#' @param event_tables Uniquely named list of event data frames, each with a
+#'   `node_id` column and none of the reserved manifest columns.
+#' @param output_dir Destination directory, created if needed.
+#' @param show_progress Whether to emit stage and progress messages.
+#' @param progress_updates Approximate number of progress messages to emit.
+#' @param compress_csv Whether the manifest CSV is gzip-compressed.
+#' @return Invisibly, a list with the sparse `matrix` and the `manifest`.
+#' @section Side effects: Writes
+#'   `mutation_event_descendant_matrix_sparse.rds` and
+#'   `mutation_event_descendant_manifest.csv` under `output_dir`.
 write_physicell_event_descendant_outputs <- function(
     nodes,
     terminal_nodes,
@@ -2624,7 +4140,7 @@ write_physicell_event_descendant_outputs <- function(
   event_frames <- lapply(event_frames, function(event_frame){
     missing_columns <- setdiff(manifest_columns, names(event_frame))
     for(column in missing_columns){
-      event_frame[[column]] <- NA
+      event_frame[[column]] <- rep(NA, nrow(event_frame))
     }
     event_frame[, manifest_columns, drop = FALSE]
   })
@@ -2706,6 +4222,17 @@ write_physicell_event_descendant_outputs <- function(
   ))
 }
 
+# ---- Output assembly and writers ----
+
+#' Reconstruct the nucleotide sequence encoded by one integration profile
+#'
+#' Reads the allele encoding position by position: `0` keeps the reference base,
+#' `-1` drops it, a whole number `1`-`4` substitutes that base, and a fractional
+#' value appends the inserted base after the reference one.
+#'
+#' @param profile_row One integration's encoded alleles, one per position.
+#' @param reference Barcode reference bases.
+#' @return One character string, whose length varies with the indels applied.
 physicell_profile_to_sequence <- function(profile_row, reference){
   bases <- c('A', 'G', 'C', 'T')
   sequence_parts <- vapply(seq_along(profile_row), function(position){
@@ -2725,6 +4252,21 @@ physicell_profile_to_sequence <- function(profile_row, reference){
   paste0(sequence_parts, collapse = '')
 }
 
+#' Assemble the sparse cell-by-recording-position allele matrix
+#'
+#' Makes two passes over the terminal profiles: the first counts the nonzero
+#' alleles at the model's output positions so the triplet vectors can be sized
+#' exactly, the second fills them. Columns run integration by integration as
+#' `int_<i>_pos_<position>`.
+#'
+#' @param terminal_profiles Named list of terminal-cell profiles, dense or
+#'   sparse; the names become the row names.
+#' @param model Prepared recording model supplying `output_positions` and
+#'   `num_integrations`.
+#' @param show_progress Whether to emit progress messages.
+#' @param progress_updates Approximate number of progress messages to emit.
+#' @return A sparse `Matrix` of encoded alleles.
+#' @note Requires the `Matrix` package.
 physicell_sparse_recording_matrix <- function(terminal_profiles,
                                               model,
                                               show_progress = FALSE,
@@ -2851,7 +4393,148 @@ physicell_sparse_recording_matrix <- function(terminal_profiles,
   )
 }
 
+#' One-hot encode PALINCODE states as phylogenetic characters
+#'
+#' Expands every cBit into three columns (`left`, `right`, `both`); a wild-type
+#' cBit is all three zeros, so an edited cBit contributes exactly one nonzero.
+#' Columns of `state_matrix` that are not cBit positions are dropped.
+#'
+#' @param state_matrix Cell-by-position PALINCODE state matrix in the column
+#'   layout produced by `physicell_sparse_recording_matrix()`; coerced to sparse
+#'   when it is not already.
+#' @param model Prepared PALINCODE model.
+#' @return A sparse indicator matrix with `int_<i>_<cbit>_<state>` columns.
+#' @note Errors unless every stored state is `1`, `2`, or `3`.
+physicell_palincode_character_matrix <- function(state_matrix, model){
+  if(!isTRUE(model$is_palincode)){
+    stop('A PALINCODE model is required to encode PALINCODE characters.')
+  }
+  if(!requireNamespace('Matrix', quietly = TRUE)){
+    stop('The Matrix package is required for PALINCODE character output.')
+  }
+  if(!inherits(state_matrix, 'Matrix')){
+    state_matrix <- Matrix::Matrix(state_matrix, sparse = TRUE)
+  }
+  num_cbits <- model$palincode$num_cbits_per_integration
+  num_integrations <- model$num_integrations
+  state_names <- c('left', 'right', 'both')
+  column_names <- unlist(lapply(seq_len(num_integrations), function(integration){
+    unlist(lapply(seq_len(num_cbits), function(cbit_index){
+      paste0(
+        'int_', integration, '_',
+        model$palincode$cbit_names[cbit_index], '_',
+        state_names
+      )
+    }))
+  }))
+  entries <- methods::as(state_matrix, 'TsparseMatrix')
+  if(length(entries@x) == 0L){
+    return(Matrix::sparseMatrix(
+      i = integer(),
+      j = integer(),
+      x = numeric(),
+      dims = c(nrow(state_matrix), length(column_names)),
+      dimnames = list(rownames(state_matrix), column_names)
+    ))
+  }
+  entry_rows <- entries@i + 1L
+  entry_columns <- entries@j + 1L
+  entry_values <- entries@x
+  positions_per_integration <- length(model$output_positions)
+  position_indices <-
+    ((entry_columns - 1L) %% positions_per_integration) + 1L
+  positions <- model$output_positions[position_indices]
+  integrations <-
+    ((entry_columns - 1L) %/% positions_per_integration) + 1L
+  cbit_indices <- match(positions, model$palincode$cbit_positions)
+  retained <- !is.na(cbit_indices)
+  states <- as.integer(round(entry_values[retained]))
+  if(any(abs(entry_values[retained] - states) > 1e-8) ||
+     any(!(states %in% 1:3))){
+    stop('PALINCODE cBit states must use the integer encoding 0, 1, 2, or 3.')
+  }
+  character_columns <- (
+    (integrations[retained] - 1L) * num_cbits +
+      cbit_indices[retained] - 1L
+  ) * 3L + states
+  Matrix::sparseMatrix(
+    i = entry_rows[retained],
+    j = character_columns,
+    x = rep.int(1, sum(retained)),
+    dims = c(nrow(state_matrix), length(column_names)),
+    dimnames = list(rownames(state_matrix), column_names)
+  )
+}
+
+#' Describe every integration's target sites as a long table
+#'
+#' @param model Prepared prime-editing, PALINCODE, or generic barcode model.
+#' @return One row per integration and target. Prime-editing models add the
+#'   static ID, pegRNA assignment, efficiency, and base and effective
+#'   probabilities; PALINCODE models add the cBit names, per-state
+#'   probabilities, and outcome fractions; generic models report the position,
+#'   edit-rate class, and the base-editor reference and destination bases.
 physicell_baseline_target_layout <- function(model){
+  if(isTRUE(model$is_prime_editing)){
+    targets <- model$prime_editing$targets
+    return(do.call(rbind, lapply(
+      seq_len(model$num_integrations),
+      function(integration){
+        data.frame(
+          integration = integration,
+          static_id =
+            model$prime_editing$integration_static_ids[integration],
+          target_index = targets$target_index,
+          position = targets$target_position,
+          pegRNA_id = targets$pegRNA_id,
+          edit_sequence = targets$edit_sequence,
+          editing_efficiency = targets$editing_efficiency,
+          induced_base_probability_per_cell_cycle =
+            model$prime_editing$induced_base_probabilities,
+          induced_effective_probability_per_cell_cycle =
+            model$prime_editing$induced_effective_probabilities,
+          uninduced_base_probability_per_cell_cycle =
+            model$prime_editing$uninduced_base_probabilities,
+          uninduced_effective_probability_per_cell_cycle =
+            model$prime_editing$uninduced_effective_probabilities,
+          spacer_sequence = targets$spacer_sequence,
+          pbs_sequence = targets$pbs_sequence,
+          rtt_sequence = targets$rtt_sequence,
+          description = targets$description,
+          stringsAsFactors = FALSE
+        )
+      }
+    )))
+  }
+  if(isTRUE(model$is_palincode)){
+    num_cbits <- model$palincode$num_cbits_per_integration
+    return(do.call(rbind, lapply(
+      seq_len(model$num_integrations),
+      function(integration){
+        data.frame(
+          integration = integration,
+          static_id = model$palincode$integration_static_ids[integration],
+          target_index = seq_len(num_cbits),
+          target_name = model$palincode$cbit_names,
+          position = model$palincode$cbit_positions,
+          edit_rate_class = 'PALINCODE',
+          reference = 'wild_type',
+          alternate = 'left|right|both',
+          uninduced_edit_probability_per_cell_cycle =
+            model$palincode$uninduced_edit_probabilities,
+          induced_edit_probability_per_cell_cycle =
+            model$palincode$induced_edit_probabilities,
+          left_edit_fraction =
+            model$palincode$outcome_fractions[, 'left'],
+          right_edit_fraction =
+            model$palincode$outcome_fractions[, 'right'],
+          both_edit_fraction =
+            model$palincode$outcome_fractions[, 'both'],
+          stringsAsFactors = FALSE
+        )
+      }
+    )))
+  }
   target_positions <- sort(as.integer(names(model$be_targets)))
   if(length(target_positions) == 0){
     return(data.frame(
@@ -2879,6 +4562,19 @@ physicell_baseline_target_layout <- function(model){
   }))
 }
 
+#' Write the lineage node table, tip metadata, and Newick trees
+#'
+#' @param nodes Event-resolved lineage node table.
+#' @param terminal_nodes Sampled terminal rows.
+#' @param output_dir Destination directory, created if needed.
+#' @param show_progress Whether to emit stage and progress messages.
+#' @param progress_updates Approximate number of progress messages to emit.
+#' @param compress_csv Whether the CSVs are gzip-compressed.
+#' @return Invisibly, the tip metadata table with `sample_id`, `physicell_id`,
+#'   `node_id`, `birth_time`, `end_time`, and `branch_length`.
+#' @section Side effects: Writes `lineage_nodes.csv`, `terminal_cells.csv`,
+#'   `physicell_lineage_full.nwk`, and `physicell_lineage_sampled.nwk` under
+#'   `output_dir`.
 write_physicell_lineage_outputs <- function(nodes,
                                             terminal_nodes,
                                             output_dir,
@@ -2949,6 +4645,28 @@ write_physicell_lineage_outputs <- function(nodes,
   invisible(tip_metadata)
 }
 
+#' Write every output of a completed lineage-recording simulation
+#'
+#' Selects the terminal-cell profiles, then writes either compact sparse RDS
+#' matrices or dense CSV matrices according to `model$compact_output`, always
+#' emitting an allele matrix and a binary score matrix. PALINCODE models use the
+#' one-hot character matrix as that score matrix, and both PALINCODE and
+#' prime-editing models duplicate the pair under recorder-specific names.
+#'
+#' @param simulation Result of `simulate_recording_on_physicell_lineage()`.
+#' @param model Prepared recording model used for that simulation.
+#' @param output_dir Destination directory, created if needed.
+#' @param show_progress Whether to emit stage and progress messages.
+#' @param write_lineage Whether to also write the shared lineage outputs.
+#' @param progress_updates Approximate number of progress messages to emit.
+#' @param compress_csv Whether the CSVs are gzip-compressed.
+#' @return Invisibly, a list with the normalized `output_dir`,
+#'   `terminal_profiles`, `raw_alleles`, and `binary_scores`.
+#' @section Side effects: Writes the allele and binary-score matrices,
+#'   `mutation_events.csv`, `barcode_target_layout.csv`, `barcode_profiles.rds`,
+#'   and `run_manifest.csv` under `output_dir`; a generic barcode model also
+#'   writes `barcode_reference.fasta`, and its dense output additionally writes
+#'   `barcode_sequences.fasta`.
 write_physicell_recording_outputs <- function(simulation,
                                               model,
                                               output_dir,
@@ -3005,9 +4723,14 @@ write_physicell_recording_outputs <- function(simulation,
       show_progress = show_progress,
       progress_updates = progress_updates
     )
-    binary_scores <- raw_alleles
-    if(length(binary_scores@x) > 0){
-      binary_scores@x[] <- 1
+    binary_scores <- if(isTRUE(model$is_palincode)){
+      physicell_palincode_character_matrix(raw_alleles, model)
+    } else{
+      scores <- raw_alleles
+      if(length(scores@x) > 0){
+        scores@x[] <- 1
+      }
+      scores
     }
     saveRDS(
       raw_alleles,
@@ -3017,6 +4740,25 @@ write_physicell_recording_outputs <- function(simulation,
       binary_scores,
       file.path(output_dir, 'barcode_binary_score_matrix_sparse.rds')
     )
+    if(isTRUE(model$is_palincode)){
+      saveRDS(
+        raw_alleles,
+        file.path(output_dir, 'palincode_state_matrix_sparse.rds')
+      )
+      saveRDS(
+        binary_scores,
+        file.path(output_dir, 'palincode_character_matrix_sparse.rds')
+      )
+    } else if(isTRUE(model$is_prime_editing)){
+      saveRDS(
+        raw_alleles,
+        file.path(output_dir, 'prime_editing_state_matrix_sparse.rds')
+      )
+      saveRDS(
+        binary_scores,
+        file.path(output_dir, 'prime_editing_character_matrix_sparse.rds')
+      )
+    }
     physicell_log_stage(
       'Barcode output: compact sparse matrices written.',
       enabled = show_progress
@@ -3036,7 +4778,11 @@ write_physicell_recording_outputs <- function(simulation,
       }
     ))
     colnames(raw_alleles) <- column_names
-    binary_scores <- (raw_alleles != 0) * 1L
+    binary_scores <- if(isTRUE(model$is_palincode)){
+      as.matrix(physicell_palincode_character_matrix(raw_alleles, model))
+    } else{
+      (raw_alleles != 0) * 1L
+    }
     write_physicell_csv(
       raw_alleles,
       file.path(output_dir, 'barcode_alleles.csv'),
@@ -3049,6 +4795,33 @@ write_physicell_recording_outputs <- function(simulation,
       row.names = TRUE,
       compress = compress_csv
     )
+    if(isTRUE(model$is_palincode)){
+      write_physicell_csv(
+        raw_alleles,
+        file.path(output_dir, 'palincode_state_matrix.csv'),
+        row.names = TRUE,
+        compress = compress_csv
+      )
+      write_physicell_csv(
+        binary_scores,
+        file.path(output_dir, 'palincode_character_matrix.csv'),
+        row.names = TRUE,
+        compress = compress_csv
+      )
+    } else if(isTRUE(model$is_prime_editing)){
+      write_physicell_csv(
+        raw_alleles,
+        file.path(output_dir, 'prime_editing_state_matrix.csv'),
+        row.names = TRUE,
+        compress = compress_csv
+      )
+      write_physicell_csv(
+        binary_scores,
+        file.path(output_dir, 'prime_editing_character_matrix.csv'),
+        row.names = TRUE,
+        compress = compress_csv
+      )
+    }
     physicell_log_stage(
       'Barcode output: dense matrices written.',
       enabled = show_progress
@@ -3065,14 +4838,29 @@ write_physicell_recording_outputs <- function(simulation,
     row.names = FALSE,
     compress = compress_csv
   )
+  target_layout <- physicell_baseline_target_layout(model)
   write_physicell_csv(
-    physicell_baseline_target_layout(model),
+    target_layout,
     file.path(output_dir, 'barcode_target_layout.csv'),
     row.names = FALSE,
     compress = compress_csv
   )
+  if(isTRUE(model$is_prime_editing)){
+    write_physicell_csv(
+      target_layout,
+      file.path(output_dir, 'prime_editing_target_manifest.csv'),
+      row.names = FALSE,
+      compress = compress_csv
+    )
+  }
   physicell_log_stage(
-    'Barcode output: saving terminal profiles and barcode reference.',
+    if(isTRUE(model$is_palincode)){
+      'Barcode output: saving terminal PALINCODE profiles.'
+    } else if(isTRUE(model$is_prime_editing)){
+      'Barcode output: saving terminal prime-editing profiles.'
+    } else{
+      'Barcode output: saving terminal profiles and barcode reference.'
+    },
     enabled = show_progress
   )
   saveRDS(
@@ -3080,12 +4868,19 @@ write_physicell_recording_outputs <- function(simulation,
     file.path(output_dir, 'barcode_profiles.rds')
   )
 
-  writeLines(
-    c('>remote_mito_barcode_reference', paste0(model$barcode_sequence, collapse = '')),
-    file.path(output_dir, 'barcode_reference.fasta')
-  )
+  if(!isTRUE(model$is_palincode) && !isTRUE(model$is_prime_editing)){
+    writeLines(
+      c(
+        '>remote_mito_barcode_reference',
+        paste0(model$barcode_sequence, collapse = '')
+      ),
+      file.path(output_dir, 'barcode_reference.fasta')
+    )
+  }
 
-  if(!isTRUE(model$compact_output)){
+  if(!isTRUE(model$compact_output) &&
+     !isTRUE(model$is_palincode) &&
+     !isTRUE(model$is_prime_editing)){
     physicell_log_stage(
       'Barcode output: writing reconstructed barcode FASTA.',
       enabled = show_progress
@@ -3137,8 +4932,20 @@ write_physicell_recording_outputs <- function(simulation,
       nrow(terminal_nodes),
       model$barcode_length,
       model$num_integrations,
-      length(model$be_targets),
-      model$num_integrations * length(model$be_targets),
+      if(isTRUE(model$is_palincode)){
+        model$palincode$num_cbits_per_integration
+      } else if(isTRUE(model$is_prime_editing)){
+        nrow(model$prime_editing$targets)
+      } else{
+        length(model$be_targets)
+      },
+      model$num_integrations * if(isTRUE(model$is_palincode)){
+        model$palincode$num_cbits_per_integration
+      } else if(isTRUE(model$is_prime_editing)){
+        nrow(model$prime_editing$targets)
+      } else{
+        length(model$be_targets)
+      },
       nrow(simulation$mutation_events),
       model$recorder_system,
       model$profile_storage,
@@ -3156,6 +4963,45 @@ write_physicell_recording_outputs <- function(simulation,
     ),
     stringsAsFactors = FALSE
   )
+  if(isTRUE(model$is_palincode)){
+    manifest <- rbind(
+      manifest,
+      data.frame(
+        property = c(
+          'palincode_static_id_length',
+          'palincode_state_encoding',
+          'palincode_character_encoding'
+        ),
+        value = c(
+          model$palincode$static_id_length,
+          '0=wild_type;1=left;2=right;3=both',
+          'one-hot edited outcomes: left,right,both; wild type is all zero'
+        ),
+        stringsAsFactors = FALSE
+      )
+    )
+  } else if(isTRUE(model$is_prime_editing)){
+    manifest <- rbind(
+      manifest,
+      data.frame(
+        property = c(
+          'prime_editing_pool_source',
+          'prime_editing_assignment',
+          'prime_editing_pool_size',
+          'prime_editing_static_id_length',
+          'prime_editing_state_encoding'
+        ),
+        value = c(
+          model$prime_editing$pool_source,
+          model$prime_editing$assignment,
+          nrow(model$prime_editing$pool),
+          model$prime_editing$static_id_length,
+          '0=unedited;1=assigned pegRNA edit'
+        ),
+        stringsAsFactors = FALSE
+      )
+    )
+  }
   write_physicell_csv(
     manifest,
     file.path(output_dir, 'run_manifest.csv'),

@@ -1,3 +1,35 @@
+# Turn integer-encoded mutation profiles into per-cell nucleotide sequences and
+# write them out as FASTA. Profiles encode 0 as the reference base, -1 as a
+# deletion, 1-4 as a substitution to A/G/C/T, and a decimal as an insertion.
+# Deletions drop characters and insertions add them, so records come out at
+# different lengths (the "difflen" of the file name) and are not mutually
+# aligned. Sourced by sim5_code.R, which supplies seqinr and `one_cluster`.
+
+#' Downsample each cell's integrations or mitochondrial genomes
+#'
+#' Models sequencing recovery. For every cell an independent
+#' `rbinom(1, num_ints, int_rec_prob)` draw decides how many molecules are seen,
+#' then that many row indices are sampled without replacement and kept in
+#' increasing order. Rows are subset with `drop = FALSE`, so a cell that
+#' recovers nothing still yields a well-formed zero-row matrix.
+#'
+#' @param cell_pop List of cell objects, each carrying `incoming_bc_profiles`
+#'   and/or `incoming_mt_profiles` - profiles whose rows are barcode
+#'   integrations or mitochondrial genomes and whose columns are sequence
+#'   positions.
+#' @param bc_or_mt Either `'bc'` to subset `incoming_bc_profiles` or `'mt'` to
+#'   subset `incoming_mt_profiles`; any other value is an error.
+#' @param int_rec_prob Per-molecule recovery probability, used as the binomial
+#'   success probability.
+#' @param num_ints Number of molecules available per cell. When `NULL` it is
+#'   resolved per cell as `nrow(cell$incoming_mt_profiles)`, which is the
+#'   mitochondrial path where each cell carries its own genome count.
+#' @param umis Optional vector of UMIs indexed by integration number. When
+#'   supplied it is subset by the recovered indices.
+#' @return List parallel to `cell_pop`. Each element is a named list with
+#'   `mut_mat` (the recovered rows of the profile), `which_ints_recovered` (a
+#'   sorted integer vector, possibly `integer(0)`), and, only when `umis` was
+#'   given, `recovered_umis`.
 get_profiles_ints_and_umis <- function(cell_pop,
                                        bc_or_mt,
                                        int_rec_prob = NULL,
@@ -55,6 +87,33 @@ get_profiles_ints_and_umis <- function(cell_pop,
 
 # might just get rid of fix_length
 
+#' Decode one encoded insertion into its nucleotide characters
+#'
+#' An insertion is stored as a decimal whose digits after the point are the
+#' inserted bases in `1 = A, 2 = G, 3 = C, 4 = T` order, so `0.132` is an
+#' insertion of A, C, G. The digit before the point stands for the position's
+#' own base: `0` means the reference base is still present (`ins > 0`) or has
+#' been deleted (`ins < 0`), while `1`-`4` means it was substituted. Digits are
+#' read left to right by shifting `ins` one decimal place at a time and taking
+#' the last digit of the rounded result, so the returned vector always leads
+#' with the position's own base and continues with the inserted ones.
+#'
+#' @param ins The encoded value at this position; expected to have a non-zero
+#'   fractional part. Its sign says whether the position's own base survives,
+#'   and `nchar(ins)` (minus the decimal point, and minus the sign when
+#'   negative) fixes how many characters are decoded.
+#' @param pos_num Column index of this position, used to look up the reference
+#'   base when the leading digit is `0` and `ins` is positive.
+#' @param ref_seq Character vector of reference bases, one per column.
+#' @param fixed_length When `TRUE`, a base deleted at this position (`ins < 0`
+#'   with a leading `0`) is emitted as `'?'` so the column still occupies one
+#'   character; when `FALSE` it is emitted as `''` and the column shrinks.
+#' @return Named list with `num_bases_returned` (how many elements were
+#'   produced, counting an empty-string placeholder) and `bases_returned` (the
+#'   character vector itself).
+#' @note `get_one_cell_sequence()` always calls this with `fixed_length =
+#'   FALSE`, so the `'?'` branch is unused on the current path; the comment
+#'   above marks the argument as a candidate for removal.
 ins_to_charvec <- function(ins, pos_num, ref_seq, fixed_length){
   nuc_bases <- c('A', 'G', 'C', 'T')
   if(ins > 0){ 
@@ -96,6 +155,33 @@ ins_to_charvec <- function(ins, pos_num, ref_seq, fixed_length){
   return(return_list)
 }
 
+#' Rebuild one cell's recovered molecules as nucleotide strings
+#'
+#' Walks each row of the cell's profile, converts every column into zero or more
+#' characters, and pastes the result into one string per row.
+#'
+#' @details
+#' Per-column length bookkeeping, which is what makes the records
+#' variable-length: `0` emits the reference base (one character); a
+#' substitution `1`-`4` emits the matching base (one character); `-1` emits
+#' `''`, so a deleted base shortens the molecule by one; and an insertion (value
+#' with a non-zero fractional part) is expanded by `ins_to_charvec()` with
+#' `fixed_length = FALSE`, emitting the position's own base - or nothing, when
+#' that base was itself deleted - followed by one character per inserted
+#' nucleotide. Nothing is padded, so a molecule's length is the reference length
+#' minus its deleted bases plus its inserted bases.
+#'
+#' @param cell_int_mat Numeric matrix for one cell: `n_s` recovered rows by `l`
+#'   sequence positions, holding the 0 / -1 / 1-4 / decimal encoding.
+#' @param ref_seq Character vector of the `l` reference bases.
+#' @param these_bc_int_umis Optional character vector of UMIs, one per row of
+#'   `cell_int_mat`. When supplied, each row's UMI is prepended to its sequence.
+#' @return List of length `nrow(cell_int_mat)`, each element a single sequence
+#'   string.
+#' @note Because deletions remove characters and insertions add them, the
+#'   returned strings differ in length both within and between cells, so the
+#'   FASTA built from them is unaligned rather than a fixed-width character
+#'   matrix.
 get_one_cell_sequence <- function(cell_int_mat, ref_seq, these_bc_int_umis = NULL){
   
   # cell_int_mat will be an n_s x l matrix where n_s is the number of downsampled integrations in the cell and l is the barcode length
@@ -140,6 +226,34 @@ get_one_cell_sequence <- function(cell_int_mat, ref_seq, these_bc_int_umis = NUL
 }
 
 
+#' Write every cell's reconstructed sequences to a FASTA file
+#'
+#' Runs `get_one_cell_sequence()` across the cells in parallel, then writes one
+#' record per recovered molecule under its cell's name. Cells that recovered
+#' nothing contribute no sequence and are dropped with a warning; if that leaves
+#' no cells at all, an empty file is written instead of calling `write.fasta()`.
+#' Records are emitted at whatever length `get_one_cell_sequence()` produced, so
+#' the file is unaligned.
+#'
+#' @param cell_mutmats Named list of per-cell profile matrices; the names become
+#'   the FASTA record names.
+#' @param reference Character vector of reference bases, forwarded as `ref_seq`.
+#' @param output_fasta_name Destination path ending in `.fasta`; `fasta_type` is
+#'   spliced in ahead of the extension.
+#' @param fasta_type Short label inserted into the file name, so that
+#'   `foo.fasta` with `fasta_type = 'bc'` is written as `foo_bc.fasta`.
+#' @param bc_integration_umis Optional list parallel to `cell_mutmats` holding
+#'   each cell's UMI vector; when supplied, every sequence is prefixed with its
+#'   UMI.
+#' @return The path actually written, returned invisibly.
+#' @section Side effects:
+#'   Writes `<output_fasta_name stem>_<fasta_type>.fasta`, either through
+#'   `seqinr::write.fasta` or as an empty file via `writeLines(character(),
+#'   ...)` when no cell has a sequence, and raises a warning naming how many
+#'   cells were omitted.
+#' @note Parallelism uses the cluster object `one_cluster` from the enclosing
+#'   script's global environment; it must already exist and have
+#'   `get_one_cell_sequence` and `ins_to_charvec` exported to its workers.
 write_all_cell_sequences <- function(cell_mutmats, reference, output_fasta_name, fasta_type, bc_integration_umis = NULL){
   
   if(!is.null(bc_integration_umis)){

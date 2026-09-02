@@ -1,13 +1,115 @@
+# sim5_code.R -- main driver for the mitochondrial / barcode lineage simulator.
+# Parses the run configuration (command-line flags or a parameters JSON), builds
+# the reference sequences and per-cell-type mutation probability tables, runs
+# the timestep simulation loop, and writes profiles, trees, FASTAs/score
+# matrices and plots under output/. Sources nonuniform_muts_heterogeneous.R and
+# the other helper scripts at startup; a "gillespie" simulation_engine
+# short-circuits to gillespie_pipeline.R before the plotting stack loads.
 print(strrep('#', 60))
 options(warn = 1) # print each warning as soon as it is generated
 options(error = traceback)  
 
+# ---- Run identifier ----
 # generate unique run name: 
 # set.seed(42)
 unique_run_id <- as.character(sample(1:10000000000000, size = 1))
 cat(sprintf('UNIQUE_RUN_ID=%s\n', unique_run_id))
 
+# ---- Early Gillespie engine dispatch ----
+# Gillespie runs intentionally dispatch before the historical simulator loads
+# its plotting/UI dependency stack. This keeps the exact command-line engine
+# usable in lightweight R environments and leaves timestep startup unchanged.
+early_arguments <- commandArgs(trailingOnly = TRUE)
+early_params_path <- NULL
+for(argument_index in seq_along(early_arguments)){
+  argument <- early_arguments[argument_index]
+  if(argument %in% c('-P', '--params_json_path')){
+    if(argument_index < length(early_arguments)){
+      early_params_path <- early_arguments[argument_index + 1L]
+    }
+    break
+  }
+  if(grepl('^(-P|--params_json_path)=', argument)){
+    early_params_path <- sub('^[^=]*=', '', argument)
+    break
+  }
+}
+if(!is.null(early_params_path)){
+  early_params_path <- normalizePath(early_params_path, mustWork = TRUE)
+  early_params <- if(requireNamespace('jsonlite', quietly = TRUE)){
+    jsonlite::fromJSON(early_params_path, simplifyVector = FALSE)
+  } else if(requireNamespace('rjson', quietly = TRUE)){
+    rjson::fromJSON(file = early_params_path)
+  } else{
+    stop('jsonlite or rjson is required to inspect simulation_engine.')
+  }
+  early_engine <- early_params$simulation_engine
+  if(is.list(early_engine)){
+    early_engine <- if(!is.null(early_engine$method)){
+      early_engine$method
+    } else{
+      early_engine$name
+    }
+  }
+  early_engine <- if(is.null(early_engine)){
+    'timestep'
+  } else{
+    tolower(as.character(early_engine))
+  }
+  if(length(early_engine) != 1L ||
+     !(early_engine %in% c('timestep', 'time_step', 'gillespie'))){
+    stop('simulation_engine must be timestep or gillespie.')
+  }
+  if(identical(early_engine, 'gillespie')){
+    early_script_argument <- grep(
+      '^--file=',
+      commandArgs(trailingOnly = FALSE),
+      value = TRUE
+    )[1]
+    early_repo_root <- dirname(normalizePath(
+      sub('^--file=', '', early_script_argument),
+      mustWork = TRUE
+    ))
+    setwd(early_repo_root)
+    run_spec_dir <- file.path('output', 'run_specs', unique_run_id)
+    dir.create(run_spec_dir, recursive = TRUE, showWarnings = FALSE)
+    file.copy(early_params_path, file.path(
+      run_spec_dir,
+      basename(early_params_path)
+    ))
+    source('./prime_editing.R')
+    source('./physicell_lineage.R')
+    source('./physicell_mito.R')
+    source('./ecdna_lineage.R')
+    source('./gillespie_lineage.R')
+    source('./gillespie_pipeline.R')
+    early_configuration <- early_params$gillespie
+    if(is.null(early_configuration)){
+      early_configuration <- list()
+    }
+    early_output_dir <- if(is.null(early_configuration$output_dir)){
+      file.path('output', 'gillespie', unique_run_id)
+    } else{
+      as.character(early_configuration$output_dir)
+    }
+    cat('SIMULATION_ENGINE=gillespie\n')
+    tryCatch(
+      run_gillespie_lineage_pipeline(
+        early_params,
+        params_path = early_params_path,
+        output_dir = early_output_dir
+      ),
+      error = function(error){
+        message('Gillespie simulation failed: ', conditionMessage(error))
+        quit(save = 'no', status = 1L)
+      }
+    )
+    quit(save = 'no', status = 0)
+  }
+}
 
+
+# ---- Library loading ----
 print('Loading libraries ... ')
 suppressPackageStartupMessages({
   library(shiny)
@@ -54,6 +156,7 @@ suppressPackageStartupMessages({
 })
 
 
+# ---- Command-line option parsing ----
 option_list <- list(
     make_option(c('-P', '--params_json_path'), type = 'character', default = NULL,
                 help = 'alternative parameter input method: path to simulation parameters json (overwrites any CLAs)')
@@ -63,6 +166,7 @@ opt_parser <- OptionParser(option_list = option_list, add_help_option = FALSE)
 input_args <- parse_args(opt_parser)
 
 
+# ---- Working directory and sourced helper scripts ----
 # Resolve sourced files and output paths relative to this script, regardless of
 # the caller's current working directory.
 script_path_arg <- grep('^--file=', commandArgs(trailingOnly = FALSE), value = TRUE)
@@ -77,6 +181,7 @@ print('Sourcing files ... ')
 source('./nonuniform_muts_heterogeneous.R')
 source('./substitution_models.r')
 source('./add_intervening_be_targets_to_seq.r')
+source('./prime_editing.R')
 # source('./make_babette_tree.r')
 source('./mut_to_fasta_difflen_ints.r')
 source('./parse_cell_type_specific_args.r')
@@ -85,6 +190,7 @@ print('Files sourced ... ')
 
 
 
+# ---- Run log files and sub-run id alphabet ----
 # create runlog file
 if(!dir.exists(file.path('output', 'run_logs', unique_run_id))){
   dir.create(file.path('output', 'run_logs', unique_run_id), recursive = TRUE)
@@ -99,23 +205,27 @@ diletters_grid <- expand.grid(LETTERS, LETTERS)
 diletters_vec <- apply(diletters_grid, MARGIN = 1, function(x){return(paste0(x[1], x[2]))})
 letters_diletters <<- append(LETTERS, diletters_vec)
 
+# ---- Parameter ingestion (JSON or CLAs) and run-spec archive ----
 # if the user supplied parameters through a json rather than CLAs, re-write input_args
 # create run_specs directory if it doesn't exist:
 if(!dir.exists(file.path('output', 'run_specs', unique_run_id))){
   dir.create(file.path('output', 'run_specs', unique_run_id), recursive = TRUE)
 }
 
+params_json_dir <- '.'
 if(!is.null(input_args$params_json_path)){
+  params_json_path <- normalizePath(input_args$params_json_path, mustWork = TRUE)
+  params_json_dir <- dirname(params_json_path)
   
-  old_json_name_splits <- str_split(string = input_args$params_json_path, pattern = '/')[[1]]
+  old_json_name_splits <- str_split(string = params_json_path, pattern = '/')[[1]]
   old_json_name <- old_json_name_splits[length(old_json_name_splits)]
   
   # copy this entire json over to the run_specs dir, preserving the json name:
-  file.copy(from = input_args$params_json_path, 
+  file.copy(from = params_json_path,
             to = file.path('output', 'run_specs', unique_run_id, old_json_name))
   
   # then read in the args from that json 
-  input_args <- fromJSON(file = input_args$params_json_path)
+  input_args <- fromJSON(file = params_json_path)
   
 } else{
   
@@ -135,6 +245,7 @@ if(!is.null(input_args$params_json_path)){
               quote = FALSE, row.names = FALSE, col.names = FALSE, append = TRUE, sep = '\t')
 }
 
+# ---- Random seed and nucleotide encoding tables ----
 # extract random seed info
 set.seed(input_args$random_seed)
 
@@ -150,6 +261,16 @@ force_transversions <<- input_args$force_transversions
 
 # parse through the arguments that can be applied to the same mutational run:
 # fractions:
+#' Split a semicolon-delimited command-line value into a vector
+#'
+#' Strips every space from the string, splits on `;`, and optionally coerces the
+#' pieces. Any `outputted_type` other than the three recognised names leaves the
+#' pieces as characters.
+#'
+#' @param cla_string One character string of values separated by `;`.
+#' @param outputted_type Requested element type: `'numeric'` (the default),
+#'   `'integer'`/`'int'`, or anything else to keep characters.
+#' @return A vector of the split values in the requested type.
 process_cla_string <- function(cla_string, outputted_type = 'numeric'){
   no_spaces <- str_replace_all(cla_string, ' ', '')
   fracs <- unlist(str_split(no_spaces, pattern = ';'))
@@ -164,6 +285,16 @@ process_cla_string <- function(cla_string, outputted_type = 'numeric'){
   return(fracs)
 }
 
+#' Interpret a target-dispersal configuration string
+#'
+#' The configuration is identified by its first letter after whitespace removal
+#' and upper-casing (`U` uniform, `R` random, `S` spaced). Spaced layouts are
+#' written `S:<first_target_position>:<bases_between>`, and those two fields are
+#' returned as the raw (uncoerced) character splits.
+#'
+#' @param config_str Target layout string such as `'U'`, `'R'`, or `'S:1:4'`.
+#' @return A list with `config` (the single upper-case letter), `first_targ_pos`
+#'   and `bases_btwn`; the latter two are `NA` for any configuration but `S`.
 parse_target_config <- function(config_str){
   # function that interprets user's target-dispersal throughout barcode
   
@@ -191,6 +322,17 @@ parse_target_config <- function(config_str){
 }
 
 
+#' Split a target count into high, medium, and low edit-rate classes
+#'
+#' The high/medium/low weights are normalized to sum to one and then turned into
+#' integer counts with the largest-remainder method, so no class can go negative
+#' and the three counts always add back up to `num_targets`.
+#'
+#' @param num_targets One non-negative integer; validated.
+#' @param class_fracs List with `high`, `medium`, and `low` weights. They must
+#'   be finite, non-negative, and sum to a positive value; they need not sum to
+#'   one.
+#' @return A named list with integer `num_h`, `num_m`, and `num_l`.
 parse_target_count_arguments <- function(num_targets, class_fracs){
     
   hml_rates <- as.numeric(c(class_fracs$high,
@@ -231,6 +373,16 @@ parse_target_count_arguments <- function(num_targets, class_fracs){
   return(return_list)
 }
 
+#' Parse a base-editor conversion pattern into its two bases
+#'
+#' Accepts a pattern such as `'A --> G'`: the string is upper-cased and the
+#' single A/C/G/T characters flanking an arrow (one or more dashes then `>`) are
+#' extracted.
+#'
+#' @param example_string Conversion pattern holding two different A/C/G/T bases
+#'   separated by an arrow. Malformed patterns and self-conversions raise an
+#'   error.
+#' @return A list with `from_base` and `to_base` character elements.
 parse_be_example <- function(example_string){
   
   # allow the user to specify the mutation that the BE induces (e.g. C --> A)
@@ -257,6 +409,12 @@ parse_be_example <- function(example_string){
  
 # note that we can determine if transition or transversion rates should be elevated in targets
 # by classifying the type of mutation the BE uses
+#' Classify a base-editor conversion as a transition or a transversion
+#'
+#' @param from_base Single A/C/G/T character the editor converts from.
+#' @param to_base Single A/C/G/T character the editor converts to; must differ
+#'   from `from_base`.
+#' @return `'transition'` for the A/G and C/T pairs, `'transversion'` otherwise.
 classify_be_mutation_type <- function(from_base, to_base){
   
   # based on the user-provided BE conversions, classify as transition or transversion
@@ -279,6 +437,7 @@ classify_be_mutation_type <- function(from_base, to_base){
   return('transversion') 
   
 }
+# ---- Base-editor conversion pattern ----
 if(!is.null(input_args$be_conversion_pattern)){
   be_target_fromto <- parse_be_example(input_args$be_conversion_pattern)
   be_target_from <- be_target_fromto[['from_base']]
@@ -292,6 +451,17 @@ if(!is.null(input_args$be_conversion_pattern)){
 
 
 # helper function that is used in create_bc_sequence()
+#' Randomly assign target indices to high/medium/low edit-rate classes
+#'
+#' The indices are shuffled first, so taking the three class blocks in order
+#' still gives a random assignment.
+#'
+#' @param inds Integer vector of target positions along the barcode.
+#' @param num_h Number of positions to label `'High'`.
+#' @param num_m Number of positions to label `'Medium'`.
+#' @param num_l Number of positions to label `'Low'`.
+#' @return A list whose names are the target positions and whose values are the
+#'   class labels `'High'`, `'Medium'`, or `'Low'`.
 split_inds_into_hml <- function(inds, num_h, num_m, num_l){
   
   # shuffle target inds in place
@@ -334,6 +504,16 @@ split_inds_into_hml <- function(inds, num_h, num_m, num_l){
 # of all cell types in the cell population. this can be a decimal. if only one cell type is supplied, 
 # or if all cell types have the same cell cycle length, 'auto' will increment the simulation by the cell cycle length
 
+#' Greatest common divisor of two possibly non-integer values
+#'
+#' Both values are made positive and scaled up by the power of ten that clears
+#' the decimal places of either argument, reduced by the Euclidean algorithm,
+#' then scaled back down. This keeps decimal cell-cycle lengths usable as a
+#' simulation time increment.
+#'
+#' @param a One finite numeric scalar; validated.
+#' @param b One finite numeric scalar; validated.
+#' @return The greatest common divisor, in the same decimal units as the inputs.
 gcd <- function(a, b) {
   
   # since we might be working with decimal vals, we first scale up our vals to ints
@@ -365,6 +545,11 @@ gcd <- function(a, b) {
   return(a/scale_factor)
 }
 
+#' Greatest common divisor across two or more values
+#'
+#' @param ... Numeric values, or one numeric vector, each accepted by `gcd`.
+#' @return One numeric greatest common divisor, obtained by folding `gcd` over
+#'   the concatenated values.
 gcd_multiple_vals <- function(...){
   vals <- c(...)
   return(Reduce(gcd, vals))
@@ -372,6 +557,7 @@ gcd_multiple_vals <- function(...){
 
 
   
+# ---- Simulation time increment ----
 # generate the time_inc of the simulation
 if(input_args$time_inc == 'auto'){
   cell_cycle_lengths <- sapply(input_args$cell_type_dict$cell_type_params, function(celltype){
@@ -383,6 +569,7 @@ if(input_args$time_inc == 'auto'){
 
 
 
+# ---- Editing-window closure flags and barcode base composition ----
 close_nuc_window_after_edit <- input_args$nuclease_targets$editing_window$close_after_edit
 close_be_window_after_edit <- input_args$be_targets$editing_window$close_after_edit
 
@@ -398,17 +585,33 @@ barcode_base_fracs <- c(input_args$bc_nuc_composition$frac_a,
                    input_args$bc_nuc_composition$frac_t)
 
 
+# ---- Reference sequence construction ----
 # first, create barcode and mt sequences
 # create mito and bc sequences in chars and ints
 int_to_nuc_list <- list('1' = 'A', '2' = 'G', '3' = 'C', '4' = 'T')
 nuc_to_int_list <- setNames(names(int_to_nuc_list), int_to_nuc_list)
+#' Convert an integer nucleotide code to its character
+#'
+#' @param int_val Integer code, where `1`-`4` are `A`, `G`, `C`, `T`.
+#' @return The matching single-character nucleotide from `int_to_nuc_list`.
 convert_int_to_nuc <- function(int_val){
   return(int_to_nuc_list[[as.character(int_val)]])
 }
+#' Convert a nucleotide character to its integer code
+#'
+#' @param nuc_val Single `A`, `G`, `C`, or `T` character.
+#' @return The matching entry of `nuc_to_int_list`, which stores the codes as
+#'   character strings (`'1'`-`'4'`) rather than integers.
 convert_nuc_to_int <- function(nuc_val){
   return(nuc_to_int_list[[nuc_val]])
 }
 
+#' Nucleotide composition of a sequence
+#'
+#' @param sequence Non-empty nucleotide vector. It is upper-cased before
+#'   counting and rejected if it holds anything but `A`, `G`, `C`, or `T`.
+#' @return A numeric vector of length four, named `A`, `G`, `C`, `T`, giving
+#'   each base's fraction of the sequence, including zeros for absent bases.
 sequence_nucleotide_fractions <- function(sequence){
   if(length(sequence) == 0){
     stop('Cannot calculate nucleotide fractions for an empty sequence.')
@@ -425,6 +628,36 @@ sequence_nucleotide_fractions <- function(sequence){
 
 
 # updated way to construct a barcode sequence with targets at the correct positions
+#' Build the barcode sequence and its target edit-rate class maps
+#'
+#' Base-editor targets need the underlying sequence manipulated: a sequence that
+#' avoids the editor's source base is generated first, then the targets are
+#' written back in at the configured positions. Nuclease targets need only
+#' positions. When the caller supplies target positions directly instead of
+#' high/medium/low fractions, that position-to-class list is passed through
+#' unchanged. When `path_to_bc_seq` is given, the sequence is read from disk and
+#' only target positions are generated.
+#'
+#' @param be_target_origin Single character the base editor converts from;
+#'   defaults to the script-level `be_target_from`.
+#' @param bc_length Integer barcode length. A supplied sequence must match it.
+#' @param be_targets_counts Base-editor target count, or a position-to-class
+#'   list; `NULL` when there are no base-editor targets.
+#' @param nuc_targets_counts Nuclease target count, or a position-to-class list;
+#'   `NULL` when there are no nuclease targets.
+#' @param be_targets_classfracs High/medium/low weights for base-editor targets.
+#' @param nuc_targets_classfracs High/medium/low weights for nuclease targets.
+#' @param be_targets_configs Base-editor target layout string, as understood by
+#'   `parse_target_config`.
+#' @param nuc_targets_configs Nuclease target layout string.
+#' @param path_to_bc_seq Optional path to a fixed barcode sequence, as plain
+#'   text or FASTA. Header lines and whitespace are stripped and the remainder
+#'   must be A/G/C/T only and of length `bc_length`.
+#' @param bc_base_fracs Numeric A, G, C, T fractions used when generating a
+#'   sequence.
+#' @return A list with `bc_seq` (character vector of nucleotides),
+#'   `be_basepos_editrate_classes`, and `nuc_basepos_editrate_classes` (named
+#'   position-to-class lists, `NULL` when that target type is absent).
 create_bc_sequence <- function(be_target_origin = be_target_from,
                                bc_length = input_args$bc_length, 
                                be_targets_counts = input_args$be_targets$num_targets,
@@ -667,6 +900,7 @@ create_bc_sequence <- function(be_target_origin = be_target_from,
   
 }
 
+# ---- Barcode sequence and target edit-rate classes ----
 bc_generation_return_list <- create_bc_sequence()
 baseline_seq_nucs_bc <<- bc_generation_return_list[['bc_seq']]
 # ERC == edit rate class
@@ -680,6 +914,21 @@ baseline_seq_ints_bc <<- sapply(baseline_seq_nucs_bc, convert_nuc_to_int)
 
 
 # helper func for generating target-specific prime editing sequences
+#' Assign prime-editing insertion sequences to target positions
+#'
+#' A library of `num_unique_guides` random guides is drawn first, then one guide
+#' is assigned per target; sampling is with replacement only when there are more
+#' targets than unique guides.
+#'
+#' @param target_inds Integer target positions along the barcode; they become
+#'   the names of both returned maps.
+#' @param guide_length Number of bases in each guide sequence.
+#' @param num_unique_guides Size of the guide library to draw from.
+#' @return A list with `ind_to_prime_seq_int_map` (position-keyed integer
+#'   nucleotide vectors) and `ind_to_prime_seq_nuc_map` (the same guides as
+#'   collapsed A/G/C/T strings).
+#' @note Not called by the simulation itself; the run uses the backend built by
+#'   `prepare_prime_editing_backend`. It is exercised by the regression tests.
 create_prime_editing_basepos_seqs <- function(target_inds, guide_length, num_unique_guides){
   
   # generate an insertion sequence library where each seq has length guide_length
@@ -713,22 +962,12 @@ create_prime_editing_basepos_seqs <- function(target_inds, guide_length, num_uni
   return(return_list)
 }
 
-prime_editing_system <- input_args$nuclease_targets$prime_editing_system
-
-# if our nuclease system is part of a prime editing framework:
-if(prime_editing_system){
-  
-  # assign each nuc_target to an insertion sequence with specified length based on the nubmer of unique prime sequences
-  prime_editing_list_res <- create_prime_editing_basepos_seqs(target_inds = as.integer(names(basepos_erc_nuc_list)), 
-                                                              guide_length = input_args$nuclease_targets$prime_editing_guide_length, 
-                                                              num_unique_guides = input_args$nuclease_targets$num_unique_prime_editing_guides)
-  ind_to_prime_seq_int_map <- prime_editing_list_res[['ind_to_prime_seq_int_map']]
-  ind_to_prime_seq_nuc_map <- prime_editing_list_res[['ind_to_prime_seq_nuc_map']]
-  
-} else{ # if no prime editing, set these lists to NULL
-  ind_to_prime_seq_int_map <- NULL
-  ind_to_prime_seq_nuc_map <- NULL
-}
+# ---- Prime editing state and mitochondrial reference sequence ----
+prime_editing_system <- prime_editing_enabled(input_args)
+prime_editing_backend <- NULL
+ind_to_prime_seq_int_map <- NULL
+ind_to_prime_seq_nuc_map <- NULL
+prime_editing_efficiency_by_position <- NULL
 
 # always going to randomly generate the mt sequence
 baseline_seq_ints_mt <<- sample(seq(1,4), size = input_args$mito_genome_length, replace = TRUE)
@@ -756,6 +995,21 @@ induced_tm_list <- tm_lists_res[['induced_tm_list']]
 # depending on the user's chosen nucleotide substitution model, extract the relevant parameters
 # this will have to be done for both the barcode and mt mutational processes
 # return substitution probability matrix
+#' Build a nucleotide substitution probability matrix from model parameters
+#'
+#' Dispatches on the model name and reads that model's positional parameters out
+#' of a semicolon-delimited string. The equilibrium base frequencies used by
+#' F81, HKY, and GTR are measured from `sequence_with_targets` rather than
+#' supplied.
+#'
+#' @param raw_cla_submodel Model name: `'JC'`, `'K80'`, `'K81'`, `'F81'`,
+#'   `'HKY'`, or `'GTR'`.
+#' @param selected_sub_model Semicolon-delimited model parameters, in the order
+#'   the chosen model expects.
+#' @param sequence_with_targets Character nucleotide vector whose composition
+#'   supplies the base frequencies.
+#' @return A list with `sub_model_params_list` (the named parsed parameters) and
+#'   `sub_prob_mat` (the 4-by-4 A/G/C/T substitution probability matrix).
 parse_sub_model_params <- function(raw_cla_submodel, selected_sub_model, sequence_with_targets){
   split_mod_params <- process_cla_string(selected_sub_model)
   nuc_fracs <- sequence_nucleotide_fractions(sequence_with_targets)
@@ -876,6 +1130,14 @@ parse_sub_model_params <- function(raw_cla_submodel, selected_sub_model, sequenc
 # accepts a substitution model and a sequence as input, 
 # and returns a list of basepos:transition_prob for transitions
 # and a list of basepos:[transversion_base1:transversion_prob1, transversion_base2:transversion_prob2] for transversions
+#' Per-position transition probabilities for a sequence
+#'
+#' @param sequence_with_targets Character nucleotide vector, one element per
+#'   sequence position.
+#' @param sub_prob_mat 4-by-4 substitution probability matrix whose rows and
+#'   columns are ordered `A, G, C, T`.
+#' @return A list with one element per sequence position, holding the
+#'   probability of that base's transition (A/G or C/T).
 generate_transition_basepos_list <- function(sequence_with_targets, sub_prob_mat){
   # sequence with_tarets is a vector of characters of length == length(sequence) 
   
@@ -895,6 +1157,15 @@ generate_transition_basepos_list <- function(sequence_with_targets, sub_prob_mat
   return(transition_list)
 }
 
+#' Per-position transversion probabilities for a sequence
+#'
+#' @param sequence_with_targets Character nucleotide vector, one element per
+#'   sequence position.
+#' @param sub_prob_mat 4-by-4 substitution probability matrix whose rows and
+#'   columns are ordered `A, G, C, T`.
+#' @return A list with one element per sequence position; each element is a
+#'   two-element list named by the two possible destination bases and holding
+#'   their transversion probabilities.
 generate_transversion_basepos_list <- function(sequence_with_targets, sub_prob_mat){
   # transversion_list will have list structure
   # where outer names are base position number
@@ -928,6 +1199,16 @@ generate_transversion_basepos_list <- function(sequence_with_targets, sub_prob_m
 # helper functions for expanding targets to include bases in editing window:
 #############################################################
 
+#' Lower an edit-rate class by a number of degrees
+#'
+#' Recursively steps `'High'` to `'Medium'` to `'Low'`; a step below `'Low'`
+#' means the position has decayed to background and is no longer a target.
+#'
+#' @param rate Edit-rate class: `'High'`, `'Medium'`, or `'Low'`.
+#' @param num_degrees Number of decay steps to apply; `0` returns `rate`
+#'   unchanged.
+#' @return The lowered class label, or `FALSE` once the rate falls below
+#'   `'Low'`.
 drop_editrate <- function(rate, num_degrees){
   # drop an edit rate down the number of degrees
   # will return FALSE if dropped out of non-uniform range
@@ -947,6 +1228,25 @@ drop_editrate <- function(rate, num_degrees){
   return(rate)
 }
 
+#' Expand base-editor targets across their editing windows
+#'
+#' Only positions holding the same base as the target itself are editable by the
+#' base editor, so each window is restricted to matching bases. With
+#' `decaying_editing` the rate drops one class within the inner half of the
+#' window and two classes beyond it, and positions that decay past `'Low'` are
+#' dropped. Windows are clipped to the ends of the barcode.
+#'
+#' @param be_editing_window One-sided window half-width in bases; `0` disables
+#'   expansion and yields empty lists.
+#' @param basepos_erc_be_list Named list mapping each target position to its
+#'   edit-rate class.
+#' @param decaying_editing Logical; whether the rate decays with distance from
+#'   the target.
+#' @param baseline_seq_ints_bc Integer-encoded barcode sequence, used to find
+#'   matching bases and to bound the windows.
+#' @return A list with `growing_window_editrates` (the newly editable positions
+#'   mapped to their classes) and `be_window_to_target_ind_list` (each
+#'   `be_window_<n>` mapped to the positions it covers, target included).
 get_new_be_targets <- function(be_editing_window, basepos_erc_be_list, 
                                decaying_editing, baseline_seq_ints_bc){
   
@@ -1062,6 +1362,25 @@ get_new_be_targets <- function(be_editing_window, basepos_erc_be_list,
   
 }
 
+#' Expand nuclease targets across their editing windows
+#'
+#' Every position inside the window is editable, unlike the base-editor case
+#' which is restricted to matching bases. With `decaying_editing` the rate drops
+#' one class within the inner half of the window and two classes beyond it, and
+#' positions that decay past `'Low'` are dropped. Windows are clipped to the
+#' ends of the barcode.
+#'
+#' @param nuc_editing_window One-sided window half-width in bases; `0` disables
+#'   expansion and yields empty lists.
+#' @param basepos_erc_nuc_list Named list mapping each target position to its
+#'   edit-rate class.
+#' @param decaying_editing Logical; whether the rate decays with distance from
+#'   the target.
+#' @param baseline_seq_ints_bc Integer-encoded barcode sequence, used here only
+#'   for its length when bounding the windows.
+#' @return A list with `growing_window_editrates` (the newly editable positions
+#'   mapped to their classes) and `nuc_window_to_target_ind_list` (each
+#'   `nuc_window_<n>` mapped to the positions it covers, target included).
 get_new_nuc_targets <- function(nuc_editing_window, basepos_erc_nuc_list, 
                                 decaying_editing, baseline_seq_ints_bc){
   
@@ -1168,6 +1487,18 @@ get_new_nuc_targets <- function(nuc_editing_window, basepos_erc_nuc_list,
 # end of the helper functions for editing window
 
 # first a quick way of estimating probabilities ...
+#' Convert a per-cell-cycle event probability to a per-timepoint probability
+#'
+#' Assumes at most one event per site per timepoint and independence between
+#' timepoints, so the per-timepoint no-event probability is the per-cycle
+#' no-event probability raised to `1 / timepoints_per_cell_cycle`.
+#'
+#' @param prob_event_per_cell_cycle Probability of the event over one full cell
+#'   cycle, in [0, 1).
+#' @param timepoints_per_cell_cycle Number of simulation timepoints per cell
+#'   cycle.
+#' @return The per-timepoint event probability that reproduces the requested
+#'   per-cycle probability.
 estimate_prob_per_timept <- function(prob_event_per_cell_cycle, timepoints_per_cell_cycle){
   # the intuition here is that the user can estimate the probability of an event occurring at a 
   # timepoint whose resolution is finer than its cell cycle length resolution
@@ -1190,6 +1521,7 @@ estimate_prob_per_timept <- function(prob_event_per_cell_cycle, timepoints_per_c
 
 
 
+# ---- Per-cell-type parameter containers ----
 # cell type-specific substitution probability matrices
 cell_type_mt_sub_prob_mat <- list()
 cell_type_bc_sub_prob_mat <- list()
@@ -1227,6 +1559,37 @@ cell_type_cell_cycle_length <- list()
 basepos_erc_be_list <- bc_generation_return_list[['be_basepos_editrate_classes']]
 basepos_erc_nuc_list <- bc_generation_return_list[['nuc_basepos_editrate_classes']]
 
+# ---- Prime editing backend ----
+# Prepare prime editing only after the target positions have been constructed.
+# The programmed edit belongs to the target itself, not to a surrounding
+# nuclease editing window.
+if(prime_editing_system){
+  prime_editing_backend <- prepare_prime_editing_backend(
+    input_args,
+    target_positions = as.integer(names(basepos_erc_nuc_list)),
+    params_dir = params_json_dir,
+    seed = input_args$random_seed
+  )
+  ind_to_prime_seq_int_map <- prime_editing_sequence_integer_map(
+    prime_editing_backend
+  )
+  ind_to_prime_seq_nuc_map <- prime_editing_sequence_character_map(
+    prime_editing_backend
+  )
+  prime_editing_efficiency_by_position <- setNames(
+    prime_editing_backend$targets$editing_efficiency,
+    prime_editing_backend$targets$target_position
+  )
+  write_prime_editing_backend_manifest(
+    prime_editing_backend,
+    file.path(
+      'output', 'run_specs', unique_run_id,
+      'prime_editing_target_manifest.csv'
+    )
+  )
+}
+
+# ---- Editing-window target expansion ----
 # if we have an editing window, add the relevant bases' positions to the editable bases
 if(input_args$be_targets$editing_window$size > 0){
   new_be_targets_res <- get_new_be_targets(be_editing_window = input_args$be_targets$editing_window$size, 
@@ -1249,7 +1612,8 @@ if(input_args$be_targets$editing_window$size > 0){
 }
 
 
-if(input_args$nuclease_targets$editing_window$size > 0){
+if(input_args$nuclease_targets$editing_window$size > 0 &&
+   !prime_editing_system){
   new_nuc_targets_res <- get_new_nuc_targets(nuc_editing_window = input_args$nuclease_targets$editing_window$size, 
                                              basepos_erc_nuc_list = basepos_erc_nuc_list,
                                              decaying_editing = input_args$nuclease_targets$editing_window$decaying,
@@ -1270,6 +1634,7 @@ if(input_args$nuclease_targets$editing_window$size > 0){
   nuc_target_to_window_ind_list <- NULL
 }
 
+# ---- Per-cell-type mutation probability tables ----
 for(celltype in cell_type_names){
   
   print(paste0('Assigning ', celltype, ' params'))
@@ -1420,6 +1785,22 @@ for(celltype in cell_type_names){
                                                                                      shape_param = 0.5,
                                                                                      scale_param = target_deletion_prob_mean_estimate/0.5,
                                                                                      num_bootstrap_draws = 1000)
+
+      if(prime_editing_system){
+        for(position in intersect(
+          names(basepos_bc_target_insertion_probs),
+          names(prime_editing_efficiency_by_position)
+        )){
+          basepos_bc_target_insertion_probs[[position]] <-
+            prime_editing_scale_probability(
+              basepos_bc_target_insertion_probs[[position]],
+              prime_editing_efficiency_by_position[[position]]
+            )
+        }
+        # Prime-editing targets resolve to their assigned template rather than
+        # competing deletion alleles.
+        basepos_bc_target_deletion_probs <- list()
+      }
       
     } else{ # if there are no nuc targets, define empty target prob lists
       basepos_bc_target_insertion_probs <- list()
@@ -1514,6 +1895,7 @@ for(celltype in cell_type_names){
   
 }
 
+# ---- Barcode integration UMIs and reference FASTA ----
 poss_num_bc_integrations <- as.integer(input_args$max_bc_ints_per_cell)
 
 if(input_args$include_bc_umis){
@@ -1540,6 +1922,7 @@ if(input_args$include_bc_umis){
 
 
 
+# ---- Output modalities and mitochondrial population settings ----
 # reconstruction modalities: 
 # poss_recon_modals <- process_cla_string(input_args$recon_modality, outputted_type = 'character')
 poss_recon_modals <- as.character(input_args$recon_modality)
@@ -1561,6 +1944,7 @@ consider_cell_heteroplasmy_scores <- as.logical(input_args$consider_cell_heterop
 hetero_sd <- as.numeric(input_args$heteroplasmy_standard_deviation)
 
 
+# ---- Founder mitochondrion-to-genome map ----
 # map each mitochondrion to its corresponding genome inds by first generating the number of genomes per mitochondrion (poisson dist with EV average genomes per mito)
 sizes_of_mito <- rpois(n = starting_mito_per_cell, lambda = average_genomes_per_mito)
 
@@ -1578,6 +1962,7 @@ for(cumsum_ind in seq(1, length(mito_size_cumsum)-1)){
 }
 
 
+# ---- Founder heteroplasmy initialization ----
 # create initial mt genome matrix according to heteroplasmy params and initial wildtype sequence:
 
 # generate inds at which heteroplasmy will be present:
@@ -1604,6 +1989,19 @@ init_x_vals <- c()
 # user-provided weight of the fraction of deleterious heteroplasmy variants controls the severity score assignment process
 
 # random draws based on the positive score weight: if runif draw value is above positive score weight, draw from positive dist, else draw from negative
+#' Draw variant severity scores from a two-component Gaussian mixture
+#'
+#' Each draw comes from the `mean2` component with probability `mean2_weight`
+#' and from the `mean1` component otherwise. Callers pass `mean1 = -1` for the
+#' deleterious component and `mean2 = 1` for the beneficial one.
+#'
+#' @param num_draws Number of scores to draw.
+#' @param mean1 Mean of the first mixture component.
+#' @param mean2 Mean of the second mixture component.
+#' @param sigma Standard deviation shared by both components.
+#' @param mean2_weight Probability in [0, 1] that a draw uses the `mean2`
+#'   component.
+#' @return A numeric vector of length `num_draws`.
 draw_severity_scores <- function(num_draws, mean1, mean2, sigma, mean2_weight){
   
   # determine if each draw will come from mean1 dist or mean2 dist:
@@ -1638,6 +2036,40 @@ heteroplasmy_allelic_fractions <- c()
 heteroplasmy_counts <- c()
 
 
+#' Seed one heteroplasmic site across the founder cell's mitochondrial genomes
+#'
+#' Draws a penetrance fraction for the site, binomially picks which genomes
+#' carry a variant, then splits the carriers between the transition base and the
+#' two transversion bases (the two transversions split evenly). Returns sparse
+#' `(i, j, x)` triplets rather than a matrix so many sites can be bound at once.
+#'
+#' @param ind_num Index into `heteroplasmy_inds` naming the site to seed.
+#' @param draw_severity_scores Function used to draw severity scores, passed in
+#'   rather than looked up globally.
+#' @param heteroplasmy_inds Integer positions of every heteroplasmic site.
+#' @param penetrance_dist_vals Pool of beta-distributed penetrance fractions to
+#'   sample one value from.
+#' @param init_num_mito_genomes Number of mitochondrial genome rows in the
+#'   founder profile.
+#' @param transition_matches Integer vector mapping each base code to its
+#'   transition partner.
+#' @param transversion_matches List mapping each base code to its two
+#'   transversion partners.
+#' @param heteroplasmy_variant_transition_prob Probability that a carrier genome
+#'   takes the transition base rather than a transversion.
+#' @param consider_cell_heteroplasmy_scores Logical; when `FALSE` no severity
+#'   scores are drawn and `severity_scores` comes back empty.
+#' @param positive_score_weight Mixture weight on the beneficial severity
+#'   component.
+#' @param hetero_sd Standard deviation of the severity score mixture.
+#' @param baseline_seq_ints_mt Integer-encoded reference mitochondrial sequence,
+#'   used to look up the wild-type base at the site.
+#' @return A list with `rows` (an `(i, j, x)` tibble of genome row, position,
+#'   and mutated base code), plus `variant_frac`, `severity_scores`, and
+#'   `counts`, each named `transition`, `transversion_1`, `transversion_2`. All
+#'   four come back empty when no genome carries the variant.
+#' @note Not called by the current script; the founder-initialization loop below
+#'   reimplements the same draws inline with `data.table` rows.
 heteroplasmy_one_site <- function(ind_num,
                                   draw_severity_scores,
                                   heteroplasmy_inds = heteroplasmy_inds,
@@ -1744,6 +2176,7 @@ heteroplasmy_one_site <- function(ind_num,
 
 
 
+# ---- Seed heteroplasmy variants across the founder genomes ----
 ################################################### new way
 new_hetero_indexing_time_start <- Sys.time()
 print('starting heteroplasmy indexing')
@@ -1805,6 +2238,13 @@ for(ind_num in seq_along(heteroplasmy_inds)){
   mt_genomes_with_transversion2 <- setdiff(mt_genomes_with_transversion, mt_genomes_with_transversion1)
   num_mt_genomes_with_transversion2 <- length(mt_genomes_with_transversion2)
   
+  #' Internal: build one mutation-class triplet table for the current site
+  #'
+  #' @param genomes Integer mitochondrial genome row indices carrying this
+  #'   mutation class.
+  #' @param base Integer code of the mutated base.
+  #' @return A `data.table` of `(i, j, x)` rows at the current heteroplasmy
+  #'   position, or `NULL` when `genomes` is empty.
   make_dt <- function(genomes, base){
     if(length(genomes) == 0){
       return(NULL)
@@ -1898,6 +2338,19 @@ new_hetero_indexing_time_end <- Sys.time()
 
 initial_heteroplasmy_score <- 0
 
+#' Survival probability for a cell given its heteroplasmy score
+#'
+#' A logistic curve anchored so that a cell whose score equals `init_score`
+#' survives with probability `init_heteroplasmy_survive_prob`. Positive `beta`
+#' makes higher scores more survivable; negative `beta` less.
+#'
+#' @param this_score The cell's current heteroplasmy score.
+#' @param init_score Score at which the curve is anchored, normally the founder
+#'   cell's score.
+#' @param init_heteroplasmy_survive_prob Survival probability at `init_score`;
+#'   must be strictly between 0 and 1.
+#' @param beta Slope of the logit in score units; defaults to `1`.
+#' @return The survival probability, a numeric scalar in (0, 1).
 logistic_prob_survive_given_score <- function(this_score, 
                                               init_score,
                                               init_heteroplasmy_survive_prob, 
@@ -1924,6 +2377,7 @@ if(consider_cell_heteroplasmy_scores){
 
 
 
+# ---- Recovery, output, and endpoint settings ----
 poss_mt_genome_recovery_probs <- as.numeric(input_args$mt_genome_recovery_prob)
 poss_bc_integration_recovery_probs <- as.numeric(input_args$bc_integration_recovery_prob)
 poss_fasta_types <- as.character(input_args$fasta_type)
@@ -1969,6 +2423,15 @@ poss_trim_depths <- c()
 poss_lin_strings <- c()
 
 # old func, no longer necessary ... 
+#' Lower bound on the number of cells existing at a timepoint (legacy)
+#'
+#' @param timept Simulation timepoint.
+#' @param cc_length Cell-cycle length in the same units.
+#' @return `0` when `timept` equals one cell cycle, otherwise the summed
+#'   doubling series `2^t * init_pop_size` over the whole cycles before
+#'   `timept`.
+#' @note Retained for compatibility and still exported to the workers, but never
+#'   called; it also reads `init_pop_size` from the enclosing scope.
 old_cells_at_timept <- function(timept, cc_length){
   
   if(timept == cc_length){
@@ -1982,6 +2445,17 @@ old_cells_at_timept <- function(timept, cc_length){
 
 
 # helper function for renumbering mito genomes after division
+#' Renumber mitochondrial genome indices consecutively
+#'
+#' Flattens the mitochondrion-to-genome index list, replaces the indices with
+#' `1..n` in flattened order, and re-splits them into the original per-
+#' mitochondrion groups. Used after a daughter's profile is subset out of its
+#' parent's, so the stored indices address rows of the new matrix.
+#'
+#' @param mito_to_genome_list List whose elements are the genome row indices
+#'   belonging to each mitochondrion.
+#' @return A list of the same element lengths, with genome indices renumbered
+#'   from `1` and named by group position.
 reassign_genome_inds <- function(mito_to_genome_list){
   flat <- unlist(mito_to_genome_list, use.names = FALSE)
   numbered <- seq_along(flat)
@@ -1989,6 +2463,35 @@ reassign_genome_inds <- function(mito_to_genome_list){
   
 }
 
+#' Apply one round of mitochondrial fusion, fission, replication, and division
+#'
+#' Fusion and fission counts are drawn from Poisson distributions whose means
+#' scale with the current mitochondrion count, then executed in a random order:
+#' a fusion merges two mitochondria's genome sets, a fission splits one
+#' mitochondrion's genomes into two non-empty halves. Every mitochondrion and
+#' genome is then duplicated, mitochondria (not individual genomes) are
+#' allocated binomially between the two daughters, and each daughter's genome
+#' indices are renumbered against its own profile. Post-mitotic dropout finally
+#' removes a binomial share of each daughter's mitochondria along with their
+#' genome rows.
+#'
+#' @param mito_to_genome_map List mapping each mitochondrion to its genome row
+#'   indices in `incoming_mito_mat`.
+#' @param incoming_mito_mat Sparse mutation matrix whose rows are mitochondrial
+#'   genomes and whose columns are sequence positions.
+#' @param fusion_events_per_mito_per_division Poisson rate of fusion events per
+#'   mitochondrion per division.
+#' @param split_events_per_mito_per_division Poisson rate of fission events per
+#'   mitochondrion per division.
+#' @param inheritance_pattern Allocation rule; only `'random'` is implemented
+#'   and any other value raises an error.
+#' @param post_mitotic_mt_deletion_frac Per-mitochondrion probability of being
+#'   dropped from a daughter after division; `0` disables dropout.
+#' @return A list with `daughter1_mt_profile` and `daughter2_mt_profile` (sparse
+#'   matrices) plus `daughter1_mito_to_genome_map` and
+#'   `daughter2_mito_to_genome_map` (renumbered index lists).
+#' @note Fusion and fission use `<<-` from inside `sapply`, which reaches the
+#'   function's own frame, so the caller's `mito_to_genome_map` is left alone.
 mito_dynamics <- function(mito_to_genome_map, incoming_mito_mat, fusion_events_per_mito_per_division,
                           split_events_per_mito_per_division,
                           inheritance_pattern = 'random', post_mitotic_mt_deletion_frac = 0){
@@ -2204,6 +2707,21 @@ mito_dynamics <- function(mito_to_genome_map, incoming_mito_mat, fusion_events_p
 
 # generate the indices of the cells that will be recovered at each timepoint according to fraction of total cells captured up front. 
 # this will only work correctly on terminal cell fastas. 
+#' Pre-draw which terminal cells are recovered at each stopping point
+#'
+#' The terminal population at a stopping point is assumed to be
+#' `2^floor(timepoint / cell_cycle_length)` cells, and a `ceiling`-rounded share
+#' of them is sampled without replacement for each recovery rate.
+#'
+#' @param cell_sample_rate_vec Numeric recovery rates in [0, 1].
+#' @param sim_length_stopping_points Timepoints at which output is produced.
+#' @param cell_cycle_length Cell-cycle length in simulation time units.
+#' @return A data frame with one row per (stopping point, rate) pair holding
+#'   `cell_recovery_rate`, `num_terminal_cells`,
+#'   `num_existing_nonterminal_cells`, `num_downsampled_cells`, and the list
+#'   column `which_cells_recovered`.
+#' @note Only meaningful for terminal-cell output; the population-size formula
+#'   assumes synchronous doubling with no death. Not called by the current run.
 generate_downsample_cells <- function(cell_sample_rate_vec, sim_length_stopping_points, cell_cycle_length){
   
   cell_downsample_df <- data.frame(cell_recovery_rate = numeric(),
@@ -2246,6 +2764,17 @@ generate_downsample_cells <- function(cell_sample_rate_vec, sim_length_stopping_
 
 # generate integrations that will be selected in downsampling approaches for mt and bc:
 # this will be run before the simulation bg
+#' Pre-draw which integrations are recovered for each parameter combination
+#'
+#' @param max_ints_per_cell_vec Integer counts of integrations (or mitochondrial
+#'   genomes) present per cell.
+#' @param recovery_rate_vec Numeric recovery rates in [0, 1]; the recovered
+#'   count is `ceiling(max_ints_per_cell * recovery_rate)`.
+#' @return A data frame with one row per combination holding
+#'   `max_ints_per_cell`, `recovery_rate`, `num_recovered_ints`, and the list
+#'   column `which_ints_recovered`.
+#' @note Not called by the current run; integration recovery is drawn per cell
+#'   by `get_profiles_ints_and_umis`.
 generate_downsample_integrations <- function(max_ints_per_cell_vec, recovery_rate_vec){
   
   
@@ -2278,6 +2807,20 @@ generate_downsample_integrations <- function(max_ints_per_cell_vec, recovery_rat
   
 }
 
+#' Sample the subset of cells that receive an induction
+#'
+#' Exactly one of the two size arguments drives the draw: a fixed `num_cells` is
+#' capped at the number of available cells, while `frac_cells` is used as a
+#' binomial success probability, so the selected count varies between runs.
+#'
+#' @param cell_names Cell identifiers eligible for induction; coerced to
+#'   character.
+#' @param num_cells Fixed number to induce; must be one non-negative integer
+#'   when supplied.
+#' @param frac_cells Fraction to induce; must be one value in [0, 1]. Used only
+#'   when `num_cells` is `NULL`.
+#' @return A character vector of selected cell names, empty when nothing is
+#'   selected or no cells are available.
 sample_induced_cells <- function(cell_names, num_cells = NULL, frac_cells = NULL){
   cell_names <- as.character(cell_names)
   num_available <- length(cell_names)
@@ -2309,6 +2852,31 @@ sample_induced_cells <- function(cell_names, num_cells = NULL, frac_cells = NULL
   sample(cell_names, size = num_selected, replace = FALSE)
 }
 
+#' Build the time-zero founder cell records
+#'
+#' Every founder starts alive, terminal, and parentless, and is named by its
+#' integer index. All founders share the same initial mitochondrial profile,
+#' barcode profile, mitochondrion-to-genome map, and heteroplasmy score; they
+#' differ only in their division schedule and induction status.
+#'
+#' @param init_pop_size Number of founder cells; must be one positive integer.
+#' @param founder_cell_type Cell type assigned to every founder.
+#' @param division_points_by_founder List of eligible division timepoints, one
+#'   element per founder; its length must equal `init_pop_size`.
+#' @param init_incoming_mt_profile Sparse mitochondrial mutation matrix shared
+#'   by the founders.
+#' @param init_incoming_bc_profile Sparse barcode mutation matrix shared by the
+#'   founders.
+#' @param mito_to_genome_map Mitochondrion-to-genome index list shared by the
+#'   founders.
+#' @param initial_heteroplasmy_score Heteroplasmy score stored on each founder.
+#' @param init_heteroplasmy_survive_prob Survival probability stored on each
+#'   founder.
+#' @param editing_induced_founders Names of the founders whose `induced_editing`
+#'   field is set to `'induced_editing_params'`; all others are uninduced.
+#' @param differentiation_induced_founders Names of the founders whose
+#'   `induced_differentiation` field is set to `TRUE`.
+#' @return A named list of founder cell records, keyed by founder name.
 initialize_founder_population <- function(init_pop_size,
                                           founder_cell_type,
                                           division_points_by_founder,
@@ -2358,6 +2926,124 @@ initialize_founder_population <- function(init_pop_size,
 }
 
 # replace pos_er_list in here ........
+#' Create the founder population and start the parallel worker cluster
+#'
+#' Builds the global `poss_times` grid, draws each founder's division schedule
+#' from an exponential waiting-time model, applies any induction scheduled for
+#' time zero, assembles the founder records, then starts a `parallel` cluster
+#' and exports the mutation helpers along with every parameter collection the
+#' workers read. Most arguments exist only to be exported.
+#'
+#' @param num_clusters Number of worker processes to start.
+#' @param init_pop_size Number of founder cells; must be one positive integer.
+#' @param sim_length Simulation horizon; bounds the time grid and the division
+#'   schedules.
+#' @param cell_type_cell_cycle_length Named list of mean cell-cycle lengths per
+#'   cell type.
+#' @param num_rows_mt Rows of the founder mitochondrial profile.
+#' @param num_cols_mt Columns of the mitochondrial profile (genome length).
+#' @param num_rows_bc Rows of the barcode profile (maximum integrations).
+#' @param num_cols_bc Columns of the barcode profile (barcode length).
+#' @param time_inc Simulation time increment; sets the spacing of `poss_times`.
+#' @param init_incoming_mt_profile Sparse founder mitochondrial mutation matrix.
+#' @param cell_type_basepos_bc_nontarget_transition_probs Per-cell-type,
+#'   per-induction background barcode transition probability by position.
+#' @param cell_type_basepos_bc_nontarget_transversion_probs As above, for
+#'   background barcode transversions.
+#' @param cell_type_basepos_bc_nontarget_insertion_probs As above, for
+#'   background barcode insertions.
+#' @param cell_type_basepos_bc_nontarget_deletion_probs As above, for background
+#'   barcode deletions.
+#' @param cell_type_basepos_mt_nontarget_transition_probs Background
+#'   mitochondrial transition probability by position.
+#' @param cell_type_basepos_mt_nontarget_transversion_probs Background
+#'   mitochondrial transversion probability by position.
+#' @param cell_type_basepos_mt_nontarget_insertion_probs Background
+#'   mitochondrial insertion probability by position.
+#' @param cell_type_basepos_mt_nontarget_deletion_probs Background mitochondrial
+#'   deletion probability by position.
+#' @param cell_type_basepos_bc_target_transition_probs Barcode target-site
+#'   transition probability by position.
+#' @param cell_type_basepos_bc_target_transversion_probs Barcode target-site
+#'   transversion probability by position.
+#' @param cell_type_basepos_bc_target_insertion_probs Barcode target-site
+#'   insertion probability by position.
+#' @param cell_type_basepos_bc_target_deletion_probs Barcode target-site
+#'   deletion probability by position.
+#' @param cell_type_mt_sub_prob_mat Per-cell-type mitochondrial substitution
+#'   probability matrices.
+#' @param cell_type_bc_sub_prob_mat Per-cell-type barcode substitution
+#'   probability matrices.
+#' @param cell_type_death_probs Per-cell-type death probability per timepoint.
+#' @param uninduced_tm_list Cell-type transition probabilities without
+#'   differentiation induction.
+#' @param induced_tm_list Cell-type transition probabilities under
+#'   differentiation induction.
+#' @param differentiation_induction_timepoint Timepoint at which differentiation
+#'   induction fires.
+#' @param editing_induction_timepoint Timepoint at which editing induction
+#'   fires.
+#' @param differentiation_induction_num_cells Fixed number of cells to induce
+#'   for differentiation.
+#' @param editing_induction_num_cells Fixed number of cells to induce for
+#'   editing.
+#' @param differentiation_induction_frac_cells Fraction of cells to induce for
+#'   differentiation.
+#' @param editing_induction_frac_cells Fraction of cells to induce for editing.
+#' @param custom_savename Output filename stem exported to the workers.
+#' @param forced_transversions Whether target substitutions are forced to a
+#'   fixed destination base.
+#' @param be_target_to_int Integer code of the base editor's destination base.
+#' @param sim_length_stopping_points Timepoints at which output is written.
+#' @param founder_cell_type Cell type assigned to the founders.
+#' @param poss_fasta_types Which cell sets get FASTA output (`'all_cells'`,
+#'   `'terminal'`).
+#' @param include_var_pos_fasta Whether variable-position FASTAs are written.
+#' @param interdeletion_dropout_radius Radius used when dropping sites between
+#'   paired deletions.
+#' @param interdeletion_dropout_prob Probability used for that dropout.
+#' @param poss_recon_modals Modalities to simulate and reconstruct (`'mt'`,
+#'   `'bc'`).
+#' @param mito_to_genome_map Founder mitochondrion-to-genome index list.
+#' @param fusion_events_per_mito_per_division Poisson fusion rate per
+#'   mitochondrion per division.
+#' @param split_events_per_mito_per_division Poisson fission rate per
+#'   mitochondrion per division.
+#' @param post_mitotic_mt_deletion_frac Per-mitochondrion post-division dropout
+#'   probability.
+#' @param positive_score_weight Mixture weight on the beneficial severity
+#'   component.
+#' @param hetero_sd Standard deviation of the severity score mixture.
+#' @param heteroplasmy_severity_score_list Variant name to severity score map.
+#' @param init_heteroplasmy_survive_prob Founder survival probability anchor.
+#' @param mito_inheritance_pattern Mitochondrial allocation rule; only
+#'   `'random'` is implemented.
+#' @param heteroplasmy_variant_fractions Variant name to variant fraction map.
+#' @param initial_heteroplasmy_score Founder heteroplasmy score.
+#' @param init_num_mito_genomes Number of mitochondrial genomes in the founder.
+#' @param ind_to_prime_seq_int_map Target position to integer prime-editing
+#'   guide map.
+#' @param ind_to_prime_seq_nuc_map Target position to nucleotide prime-editing
+#'   guide map.
+#' @param prime_editing_system Whether prime editing is enabled.
+#' @param close_nuc_window_after_edit Whether a nuclease window closes once one
+#'   of its positions is edited.
+#' @param close_transition_window_after_edit Whether a base-editor transition
+#'   window closes after an edit.
+#' @param close_transversion_window_after_edit Whether a base-editor
+#'   transversion window closes after an edit.
+#' @param be_target_to_window_ind_list Base-editor position to window-name map.
+#' @param nuc_target_to_window_ind_list Nuclease position to window-name map.
+#' @param be_window_to_target_ind_list Base-editor window-name to positions map.
+#' @param nuc_window_to_target_ind_list Nuclease window-name to positions map.
+#' @param consider_cell_heteroplasmy_scores Whether heteroplasmy scores drive
+#'   cell survival.
+#' @return The named list of founder cell records that starts the simulation.
+#' @section Side effects: Assigns the globals `poss_times`, `one_cluster`,
+#'   `already_assigned_editing_induction`, `already_assigned_diff_induction`,
+#'   and `cluster_startup_total`. Starts a `parallel` cluster, seeds its RNG
+#'   streams from `input_args$random_seed`, and restores the main process's
+#'   `.Random.seed` afterwards so worker seeding does not perturb it.
 setup_sim <- function(num_clusters, 
                       init_pop_size, 
                       sim_length, 
@@ -2438,6 +3124,15 @@ setup_sim <- function(num_clusters,
   
   
   # generate initial elig_div_points by drawing from an exponential distribution:
+  #' Internal: draw a cell's future division timepoints
+  #'
+  #' @param sim_length Horizon past which division points are discarded.
+  #' @param cc_length Mean cell-cycle length, used as the mean of the
+  #'   exponential waiting time between successive divisions.
+  #' @param current_timepoint Time from which to start accumulating waiting
+  #'   times.
+  #' @return An increasing numeric vector of division timepoints, all at or
+  #'   below `sim_length`.
   get_future_div_points <- function(sim_length, cc_length, current_timepoint){
     
     # empty vector to which future div points will be appended
@@ -2612,6 +3307,133 @@ setup_sim <- function(num_clusters,
   return(cell_population)
 }
 
+#' Advance the whole cell population by one simulation timepoint
+#'
+#' Runs the timepoint in a fixed order: induction assignment, division, death,
+#' then mutation. Cells whose next eligible division point has been reached
+#' divide on the worker cluster -- mitochondria pass through `mito_dynamics`,
+#' daughter cell types are drawn from the induced or uninduced transition
+#' matrix, and each daughter gets a fresh exponential division schedule; a
+#' daughter that inherits no mitochondrion is born dead. Death then combines a
+#' heteroplasmy score draw (only when `consider_cell_heteroplasmy_scores`), a
+#' per-cell-type random draw, and having lost every mitochondrion. Surviving
+#' cells finally have barcode and mitochondrial mutations applied on the
+#' workers, and a timepoint that is also a stopping point triggers the full
+#' output pass.
+#'
+#' @param timepoint The simulation time being advanced to.
+#' @param sim_length Simulation horizon, used when drawing daughter division
+#'   schedules.
+#' @param cell_population Named list of cell records at the start of the
+#'   timepoint.
+#' @param cell_type_basepos_bc_nontarget_transition_probs Background barcode
+#'   transition probability by position, per cell type and induction state.
+#' @param cell_type_basepos_bc_nontarget_transversion_probs As above, for
+#'   background barcode transversions.
+#' @param cell_type_basepos_bc_nontarget_insertion_probs As above, for
+#'   background barcode insertions.
+#' @param cell_type_basepos_bc_nontarget_deletion_probs As above, for background
+#'   barcode deletions.
+#' @param cell_type_basepos_mt_nontarget_transition_probs Background
+#'   mitochondrial transition probability by position.
+#' @param cell_type_basepos_mt_nontarget_transversion_probs Background
+#'   mitochondrial transversion probability by position.
+#' @param cell_type_basepos_mt_nontarget_insertion_probs Background
+#'   mitochondrial insertion probability by position.
+#' @param cell_type_basepos_mt_nontarget_deletion_probs Background mitochondrial
+#'   deletion probability by position.
+#' @param cell_type_basepos_bc_target_transition_probs Barcode target-site
+#'   transition probability by position.
+#' @param cell_type_basepos_bc_target_transversion_probs Barcode target-site
+#'   transversion probability by position.
+#' @param cell_type_basepos_bc_target_insertion_probs Barcode target-site
+#'   insertion probability by position.
+#' @param cell_type_basepos_bc_target_deletion_probs Barcode target-site
+#'   deletion probability by position.
+#' @param cell_type_mt_sub_prob_mat Per-cell-type mitochondrial substitution
+#'   probability matrices.
+#' @param cell_type_bc_sub_prob_mat Per-cell-type barcode substitution
+#'   probability matrices.
+#' @param cell_type_death_probs Per-cell-type death probability per timepoint.
+#' @param uninduced_tm_list Cell-type transition probabilities without
+#'   differentiation induction.
+#' @param induced_tm_list Cell-type transition probabilities under
+#'   differentiation induction.
+#' @param differentiation_induction_timepoint Timepoint at or after which
+#'   differentiation induction is assigned.
+#' @param editing_induction_timepoint Timepoint at or after which editing
+#'   induction is assigned.
+#' @param differentiation_induction_num_cells Fixed number of cells to induce
+#'   for differentiation.
+#' @param editing_induction_num_cells Fixed number of cells to induce for
+#'   editing.
+#' @param differentiation_induction_frac_cells Fraction of cells to induce for
+#'   differentiation.
+#' @param editing_induction_frac_cells Fraction of cells to induce for editing.
+#' @param already_assigned_editing_induction Whether editing induction has
+#'   already been assigned in an earlier timepoint.
+#' @param already_assigned_diff_induction Whether differentiation induction has
+#'   already been assigned in an earlier timepoint.
+#' @param forced_transversions Whether target substitutions are forced to a
+#'   fixed destination base.
+#' @param be_target_to_int Integer code of the base editor's destination base.
+#' @param unique_run_id Run identifier used in every output path.
+#' @param interdeletion_dropout_radius Radius used when dropping sites between
+#'   paired deletions.
+#' @param interdeletion_dropout_prob Probability used for that dropout.
+#' @param scoremat_collapse_deletions Whether score matrices collapse runs of
+#'   deleted positions.
+#' @param combine_mt_bc Whether mitochondrial and barcode score matrices are
+#'   joined at stopping points.
+#' @param binarize_mutation_scores Whether score matrices are binarized.
+#' @param mt_allelic_fraction_thresholds Allelic fraction thresholds applied to
+#'   mitochondrial scores.
+#' @param poss_recon_modals Modalities to simulate (`'mt'`, `'bc'`).
+#' @param fusion_events_per_mito_per_division Poisson fusion rate.
+#' @param split_events_per_mito_per_division Poisson fission rate.
+#' @param post_mitotic_mt_deletion_frac Per-mitochondrion post-division dropout
+#'   probability.
+#' @param heteroplasmy_variant_fractions Variant name to variant fraction map.
+#' @param heteroplasmy_severity_score_list Variant name to severity score map.
+#' @param positive_score_weight Mixture weight on the beneficial severity
+#'   component.
+#' @param hetero_sd Standard deviation of the severity score mixture.
+#' @param mito_inheritance_pattern Mitochondrial allocation rule; only
+#'   `'random'` is implemented.
+#' @param init_num_mito_genomes Number of mitochondrial genomes in the founder,
+#'   used to name mitochondrial output combinations.
+#' @param ind_to_prime_seq_int_map Target position to integer prime-editing
+#'   guide map.
+#' @param ind_to_prime_seq_nuc_map Target position to nucleotide prime-editing
+#'   guide map.
+#' @param prime_editing_system Whether prime editing is enabled.
+#' @param close_nuc_window_after_edit Whether a nuclease window closes once one
+#'   of its positions is edited.
+#' @param close_transition_window_after_edit Whether a base-editor transition
+#'   window closes after an edit.
+#' @param close_transversion_window_after_edit Whether a base-editor
+#'   transversion window closes after an edit.
+#' @param be_target_to_window_ind_list Base-editor position to window-name map.
+#' @param nuc_target_to_window_ind_list Nuclease position to window-name map.
+#' @param be_window_to_target_ind_list Base-editor window-name to positions map.
+#' @param nuc_window_to_target_ind_list Nuclease window-name to positions map.
+#' @param consider_cell_heteroplasmy_scores Whether heteroplasmy scores drive
+#'   cell survival.
+#' @param poss_times Full simulation time grid.
+#' @param custom_savename Output filename stem.
+#' @param sim_length_stopping_points Timepoints at which output is written.
+#' @param t Index of `timepoint` within `poss_times`, forwarded as the relative
+#'   timepoint of the output pass.
+#' @return The updated cell population list, including the new daughter cells.
+#' @section Side effects: Writes
+#'   `output/induction_details/<run_id>/differentiation_induction_df.csv` and
+#'   `editing_induction_df.csv` on the timepoint an induction fires; sets the
+#'   globals `already_assigned_diff_induction`,
+#'   `already_assigned_editing_induction`, and each cell's `heteroplasmy_score`;
+#'   dispatches work to the `one_cluster` global; and calls
+#'   `all_processes_at_stopping_point` at stopping points.
+#' @note The whole R session is terminated with `quit(save = 'no')` if every
+#'   cell is dead at this timepoint, so no tree is reconstructed for that run.
 multi_core_func <- function(timepoint, 
                             sim_length,
                             cell_population,
@@ -3103,6 +3925,24 @@ multi_core_func <- function(timepoint,
   
 }
 
+#' Build and write the ground-truth lineage tree
+#'
+#' Terminal cells become tips and non-terminal cells become internal nodes, with
+#' one edge per parent/child pair. A population started from several independent
+#' founders is a forest, so a synthetic root (renamed until it cannot collide
+#' with a lineage string) is added above the founders to make a valid `phylo`;
+#' that root stands for no division and carries no mutational branch.
+#'
+#' @param cell_population Named list of cell records, each carrying `parent` and
+#'   `terminal` fields. It must contain at least one founder.
+#' @param urid Unique run identifier, used as the output subdirectory name.
+#' @param save_path_stem Filename stem; `.newick` is appended.
+#' @param output_root Root output directory; defaults to `'output'`.
+#' @return The `phylo` tree object that was written to disk.
+#' @section Side effects: Creates and writes
+#'   `<output_root>/processed_newicks/<urid>/<save_path_stem>.newick`. A
+#'   single-cell population with no edges is written as a bare Newick tip
+#'   instead of going through `ape::write.tree`.
 create_ground_truth_tree <- function(cell_population,
                                      urid,
                                      save_path_stem,
@@ -3191,10 +4031,43 @@ create_ground_truth_tree <- function(cell_population,
   tree
 }
 
+#' Produce every output artefact for one simulation stopping point
+#'
+#' Saves the cell population as RDS and as a mutation-matrix-free JSON, writes
+#' the ground-truth Newick tree, then, for each requested reconstruction method,
+#' builds the downsampled profile lists and their FASTA or score-matrix
+#' representations. The population and the run-level settings are read from the
+#' enclosing scope rather than passed in.
+#'
+#' @param timept_savename Filename stem identifying this endpoint.
+#' @param relative_timepoint Index of this timepoint within `poss_times`, used
+#'   when slicing the timing vectors.
+#' @param this_endpoint The simulation timepoint itself.
+#' @param all_recon_methods Reconstruction methods to write output for; defaults
+#'   to `input_args$reconstruction_method`. The recognised values are
+#'   `'fasta_only'` and `'score'`.
+#' @return `NULL`, invisibly; the function is called for its side effects.
+#' @section Side effects: Writes under `output/cell_populations/`,
+#'   `output/processed_newicks/`, `output/processed_lists/`,
+#'   `output/processed_fastas/`, and `output/score_mats/`, all keyed by
+#'   `unique_run_id`. `output/linstrings/<unique_run_id>/` is created but
+#'   nothing is written into it.
 all_processes_at_stopping_point <- function(timept_savename, relative_timepoint, this_endpoint, 
                                             all_recon_methods = as.character(input_args$reconstruction_method)
 ){
   
+  #' Internal: record and plot the mutation timing for this endpoint
+  #'
+  #' @param poss_times Full simulation time grid.
+  #' @param sim_time_vec_mt Elapsed mitochondrial mutation seconds per
+  #'   timepoint.
+  #' @param sim_time_vec_bc Elapsed barcode mutation seconds per timepoint.
+  #' @param time_ind Number of leading timepoints to keep; defaults to the
+  #'   enclosing `relative_timepoint`.
+  #' @return The `ggsave` result; called for its side effects, which are a
+  #'   timing CSV and a runtime scatter plot under
+  #'   `output/timing_obj/<run_id>/`.
+  #' @note Never called by the current stopping-point pass.
   describe_mutation_process_timing <- function(poss_times, sim_time_vec_mt, sim_time_vec_bc, time_ind = relative_timepoint){
     timing_df <- data.frame(cbind(poss_times[1:time_ind], sim_time_vec_mt, sim_time_vec_bc))
     colnames(timing_df) <- c('sim_timept', 'mt_mutation_time', 'bc_mutation_time')
@@ -3234,6 +4107,15 @@ all_processes_at_stopping_point <- function(timept_savename, relative_timepoint,
   }
   
   
+  #' Internal: write the endpoint's mutation profile lists to disk
+  #'
+  #' @param mt_profiles List of mitochondrial mutation matrices.
+  #' @param bc_profiles List of barcode mutation matrices.
+  #' @return `NULL`; writes `simresults_mt_profiles_*` and
+  #'   `simresults_bc_profiles_*` RDS files under
+  #'   `output/mut_profiles/<run_id>/`, one per modality present in
+  #'   `poss_recon_modals`.
+  #' @note Never called by the current stopping-point pass.
   save_mutation_profiles <- function(mt_profiles, bc_profiles){
     # create mut_profiles subdirectory if it doesn't exist
     if(!dir.exists(file.path('output', 'mut_profiles', unique_run_id))){
@@ -3258,6 +4140,15 @@ all_processes_at_stopping_point <- function(timept_savename, relative_timepoint,
   }
   
   
+  #' Internal: build dot-separated lineage strings from a parent index vector
+  #'
+  #' @param cell_lineage Integer vector whose i-th element is the position of
+  #'   cell i's parent, or `0` when cell i is a founder.
+  #' @return A character vector of lineage strings, each daughter appending `.1`
+  #'   or `.2` to its parent's string.
+  #' @note Assigns the result to the global `lineage_strings` as well. Never
+  #'   called by the current stopping-point pass, which names cells by the
+  #'   `linstring` already stored on each record.
   create_lineage_strings <- function(cell_lineage){
     
     edge_from <- integer(length = length(cell_lineage))
@@ -3325,6 +4216,34 @@ all_processes_at_stopping_point <- function(timept_savename, relative_timepoint,
   
   
   
+  #' Internal: build and write the downsampled profile lists for one endpoint
+  #'
+  #' Handles the `'all_cells'` and `'terminal'` FASTA types. Terminal output
+  #' iterates every combination of per-cell-type sampling fractions, barcode
+  #' integration counts, and recovery probabilities, saving each profile list as
+  #' RDS and then writing it either as a FASTA or as a score matrix. With
+  #' `writeout_type = 'score'` and `combine_mt_bc`, matching mitochondrial and
+  #' barcode score matrices (same collapse-deletions setting, same endpoint) are
+  #' also column-bound into joint matrices and FASTAs.
+  #'
+  #' @param cell_population Named list of cell records for this endpoint.
+  #' @param bc_integrations Integer barcode integration counts to iterate over.
+  #' @param mito_recovery_probs Mitochondrial genome recovery probabilities.
+  #' @param bc_recovery_probs Barcode integration recovery probabilities.
+  #' @param poss_fasta_types Which cell sets to write: `'all_cells'` and/or
+  #'   `'terminal'`.
+  #' @param bc_umis Per-integration barcode UMI sequences.
+  #' @param writeout_type `'fasta_only'` or `'score'`.
+  #' @param poss_recon_modals Modalities to write (`'mt'`, `'bc'`).
+  #' @param this_timept_savename Filename stem; defaults to the enclosing
+  #'   `timept_savename`.
+  #' @return `NULL`; writes RDS profile lists under
+  #'   `output/processed_lists/<run_id>/`, FASTAs under
+  #'   `output/processed_fastas/<run_id>/`, and score matrices under
+  #'   `output/score_mats/<run_id>/`. A sampling combination that recovers no
+  #'   terminal cell raises a warning and is skipped.
+  #' @note Score output for `'all_cells'` is not implemented; that branch only
+  #'   prints a message.
   create_modified_profile_lists <- function(cell_population,
                                             bc_integrations,
                                             mito_recovery_probs,
@@ -3666,6 +4585,16 @@ all_processes_at_stopping_point <- function(timept_savename, relative_timepoint,
       }
       
       else if(writeout_type == 'fasta_only'){
+        #' Internal: write the reference FASTA for one modality
+        #'
+        #' @param bc_or_mt Either `'bc'` or `'mt'`; selects the filename prefix.
+        #' @param reference_seq Reference nucleotide vector for a single
+        #'   integration or genome.
+        #' @param max_number_of_integrations Number of times the reference is
+        #'   repeated so it matches the concatenated read length.
+        #' @param run_id Unique run identifier naming the output subdirectory.
+        #' @return `NULL`; writes `<bc_or_mt>_<n>_ints_reference.fasta` under
+        #'   `output/processed_fastas/<run_id>/reference_seqs/`.
         write_reference_fastas <- function(bc_or_mt,
                                            reference_seq,
                                            max_number_of_integrations,
@@ -3737,6 +4666,7 @@ all_processes_at_stopping_point <- function(timept_savename, relative_timepoint,
 }
 
 
+# ---- Assemble the simulation arguments and initialize the run ----
 sim_arglist <- list(num_clusters = input_args$num_cores, 
                     init_pop_size = input_args$num_init_cells,
                     init_incoming_mt_profile = init_incoming_mt_profile,
@@ -3811,6 +4741,7 @@ for(i in seq_along(sim_arglist)){
   assign(names(sim_arglist)[i], sim_arglist[[i]], envir = .GlobalEnv)
 }
 
+# ---- Main simulation loop ----
 # actually run the simulation
 for(t in seq_along(poss_times)){
   
@@ -3910,6 +4841,15 @@ for(t in seq_along(poss_times)){
 
 
 # join together specs/results across all endpoints
+#' Merge the per-endpoint result CSVs into a single file
+#'
+#' @param unique_run_id Run identifier naming the merged-results directory;
+#'   defaults to the global of the same name.
+#' @return `NULL`; reads every CSV in
+#'   `output/results/merged_results/<unique_run_id>/`, row-binds them, and
+#'   writes `merged_results_specs_<unique_run_id>_all_endpoints.csv` back into
+#'   that same directory.
+#' @note Defined here for downstream use but not called by this script.
 join_endpoint_results <- function(unique_run_id = unique_run_id){
   
   merged_results_dir_path <- file.path('output', 'results', 'merged_results', unique_run_id)
@@ -3927,6 +4867,25 @@ join_endpoint_results <- function(unique_run_id = unique_run_id){
 
 
 
+#' Plot Robinson-Foulds distance against simulation length and cell count
+#'
+#' Reads the merged all-endpoints results, groups the parameter combinations
+#' that produced identical RF distances at every endpoint into lettered colour
+#' groups, and for each modality draws one line plot against simulation length,
+#' one against cell count, and a colour-matched table of the parameter
+#' combinations. Cell count is taken as `2^endpoint`.
+#'
+#' @param run_id Run identifier; names the merged-results file and the output
+#'   directory.
+#' @param poss_recon_modals Modalities to plot, one figure set each; defaults to
+#'   the global of the same name.
+#' @param save_plots Whether to write the PNGs; defaults to `TRUE`.
+#' @return The combined `grid.arrange` object for the last modality plotted.
+#' @section Side effects: When `save_plots` is `TRUE`, writes
+#'   `<modal>_simlength_plot.png`, `<modal>_numcells_plot.png`, and
+#'   `<modal>_comb_plots.png` under `output/lineplots/<run_id>/`; that directory
+#'   is expected to exist already.
+#' @note Defined here for downstream use but not called by this script.
 make_lineplot <- function(run_id, poss_recon_modals = poss_recon_modals, save_plots = TRUE){
   
   res <- read.csv(file.path('output', 'results', 'merged_results', run_id, paste0('merged_results_specs_', run_id, '_all_endpoints.csv')),

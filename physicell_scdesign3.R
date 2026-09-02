@@ -1,6 +1,17 @@
 # Covariate construction and output helpers for PhysiCell-linked scDesign3
 # simulation. Source physicell_lineage.R and scdesign3_helpers.R first.
 
+#' Read a two-column PhysiCell property manifest into a named vector
+#'
+#' Resolves `path` through `resolve_physicell_csv_path()` so either the plain or
+#' the `.gz` form is accepted, and treats an absent file as "no properties"
+#' rather than an error.
+#'
+#' @param path Path to a manifest CSV with `property` and `value` columns. The
+#'   file is optional; a missing one yields an empty result.
+#' @return A named character vector whose names are the `property` column and
+#'   whose values are the `value` column, or a zero-length named character
+#'   vector when the file does not exist.
 read_physicell_property_manifest <- function(path){
   resolved_path <- resolve_physicell_csv_path(path, required = FALSE)
   if(is.na(resolved_path)){
@@ -20,6 +31,19 @@ read_physicell_property_manifest <- function(path){
   setNames(as.character(manifest$value), as.character(manifest$property))
 }
 
+#' Compute generation depth for every node of a lineage node table
+#'
+#' Roots (rows whose `parent_node_id` is missing or empty) get depth `0` and
+#' every other node gets its parent's depth plus one. Resolution proceeds in
+#' repeated sweeps over the still-unresolved rows, so parents may appear in any
+#' row order; a sweep that resolves nothing means the table has a dangling
+#' parent or a cycle and is reported as an error.
+#'
+#' @param nodes Data frame of lineage nodes; must contain `node_id` and
+#'   `parent_node_id`. `node_id` must be unique and non-missing.
+#' @return An integer vector of depths named by `node_id`.
+#' @note Cost is one pass per generation, so a deep lineage costs roughly
+#'   `depth * nrow(nodes)` parent lookups.
 physicell_node_depths <- function(nodes){
   required_columns <- c('node_id', 'parent_node_id')
   if(!all(required_columns %in% names(nodes))){
@@ -53,6 +77,12 @@ physicell_node_depths <- function(nodes){
   depths
 }
 
+#' Count neighbors in semicolon-delimited PhysiCell neighbor-ID fields
+#'
+#' @param values Vector coerced to character, each element a `;`-delimited list
+#'   of neighbor cell IDs. `NA` and blank/whitespace-only entries count as zero.
+#' @return An integer vector of neighbor counts, named by the input values (the
+#'   caller typically drops the names with `unname()`).
 physicell_neighbor_count <- function(values){
   values <- as.character(values)
   vapply(values, function(value){
@@ -63,6 +93,50 @@ physicell_neighbor_count <- function(values){
   }, integer(1))
 }
 
+#' Assemble the per-terminal-cell covariate table used to condition scDesign3
+#'
+#' Joins the recorded terminal cells (`terminal_cells.csv`) to the lineage node
+#' table (`lineage_nodes.csv`) and to the final PhysiCell cell table, then
+#' derives the lineage, spatial, and recorder covariates that the marginal model
+#' is conditioned on. One row per terminal cell, keyed by `sample_id`.
+#'
+#' @details
+#' Lineage depth comes from `physicell_node_depths()`; `lineage_pseudotime` is
+#' that depth divided by the maximum depth (all zero when the lineage has a
+#' single generation). `developmental_pseudotime` is taken from the PhysiCell
+#' table when that column exists and otherwise defaults to `lineage_pseudotime`;
+#' it must lie in `[0, 1]` and is copied to `pseudotime`, the name scDesign3
+#' predicts on. `culture_day` defaults to `end_time / 1440`, i.e. PhysiCell
+#' minutes converted to days.
+#'
+#' Recorder burdens are added only when their tables are present, and default to
+#' zero otherwise. Barcode edits are read from
+#' `barcode_binary_score_matrix_sparse.rds` if present (requires `Matrix`) or
+#' else from `barcode_binary_score_matrix.csv`; that matrix is cells x barcode
+#' sites with cells as row names, and any non-zero score counts as an edit, so
+#' `barcode_edit_count` is a row sum and `barcode_edit_fraction` a row mean.
+#' Mitochondrial variants are summarised per `sample_id` from
+#' `mitochondrial_variant_fractions.csv`, whose fractions must lie in `(0, 1]`.
+#' ecDNA copy/species/recorder columns come from `ecdna_cell_summary.csv`.
+#'
+#' @param recording_dir Directory holding the lineage recording output;
+#'   `terminal_cells.csv` and `lineage_nodes.csv` are required, and
+#'   `run_manifest.csv`, the barcode matrix, the mitochondrial table, and the
+#'   ecDNA summary are optional. Each is resolved plain or `.gz`.
+#' @param lineage_table_path Path to the final PhysiCell cell table; must exist
+#'   and carry `ID`, `x`, `y`, `z`, and `neighbor_IDs` columns.
+#' @param cell_type Fallback cell-type label used when the PhysiCell table has
+#'   no per-cell `cell_type` column. When `NULL`, it is read from the
+#'   `cell_type` property of `run_manifest.csv`; if neither supplies one, the
+#'   call fails.
+#' @return A data frame with one row per terminal cell containing `sample_id`,
+#'   `physicell_id`, `node_id`, `cell_type`, lineage fields (`lineage_depth`,
+#'   `lineage_pseudotime`, `developmental_pseudotime`, `pseudotime`,
+#'   `birth_time`, `sampling_time`, `branch_length`), state fields
+#'   (`culture_day`, `state_start_time`, `time_in_state`, `transition_count`),
+#'   micro-environment fields (`oxygen`, `nutrient`), spatial fields (`x`, `y`,
+#'   `z`, `neighbor_count`, `tumor_radius`, `radial_position`), `founder_id`,
+#'   and the barcode, mitochondrial, and ecDNA burden columns.
 build_physicell_sc_covariates <- function(recording_dir,
                                           lineage_table_path,
                                           cell_type = NULL){
@@ -169,6 +243,13 @@ build_physicell_sc_covariates <- function(recording_dir,
     stop('PhysiCell per-cell cell_type values must be non-missing strings.')
   }
 
+  #' Internal: read an optional numeric column from the PhysiCell cell rows
+  #'
+  #' @param column Column name looked up in `cell_rows`, the PhysiCell table
+  #'   subset to the terminal cells in `metadata` order.
+  #' @param default Value used when the column is absent; either length one
+  #'   (recycled) or already one value per terminal cell.
+  #' @return A numeric vector with one finite value per terminal cell.
   optional_numeric <- function(column, default){
     if(column %in% names(cell_rows)){
       values <- suppressWarnings(as.numeric(cell_rows[[column]]))
@@ -354,9 +435,73 @@ build_physicell_sc_covariates <- function(recording_dir,
       )
     }
   }
+
+  metadata$ecdna_copy_number <- 0L
+  metadata$ecdna_labeled_copy_number <- 0L
+  metadata$ecdna_species_count <- 0L
+  metadata$ecdna_labeled_species_count <- 0L
+  metadata$ecdna_recorder_edit_fraction <- 0
+  ecdna_path <- resolve_physicell_csv_path(
+    file.path(recording_dir, 'ecdna_cell_summary.csv'),
+    required = FALSE
+  )
+  if(!is.na(ecdna_path)){
+    ecdna <- read_physicell_csv(
+      ecdna_path,
+      colClasses = c(sample_id = 'character'),
+      stringsAsFactors = FALSE,
+      check.names = FALSE
+    )
+    required_ecdna_columns <- c(
+      'sample_id', 'total_ecdna_copies', 'labeled_ecdna_copies',
+      'observed_ecdna_species', 'observed_labeled_species',
+      'ecdna_recorder_edit_fraction'
+    )
+    if(!all(required_ecdna_columns %in% names(ecdna))){
+      stop('ecDNA cell-summary table has an invalid schema.')
+    }
+    numeric_columns <- setdiff(required_ecdna_columns, 'sample_id')
+    ecdna[numeric_columns] <- lapply(ecdna[numeric_columns], as.numeric)
+    if(any(!is.finite(as.matrix(ecdna[numeric_columns]))) ||
+       any(as.matrix(ecdna[numeric_columns]) < 0) ||
+       any(ecdna$ecdna_recorder_edit_fraction > 1)){
+      stop('ecDNA covariates must be finite, non-negative, and fractions <= 1.')
+    }
+    observed <- intersect(ecdna$sample_id, metadata$sample_id)
+    source_indices <- match(observed, ecdna$sample_id)
+    target_indices <- match(observed, metadata$sample_id)
+    metadata$ecdna_copy_number[target_indices] <- as.integer(
+      ecdna$total_ecdna_copies[source_indices]
+    )
+    metadata$ecdna_labeled_copy_number[target_indices] <- as.integer(
+      ecdna$labeled_ecdna_copies[source_indices]
+    )
+    metadata$ecdna_species_count[target_indices] <- as.integer(
+      ecdna$observed_ecdna_species[source_indices]
+    )
+    metadata$ecdna_labeled_species_count[target_indices] <- as.integer(
+      ecdna$observed_labeled_species[source_indices]
+    )
+    metadata$ecdna_recorder_edit_fraction[target_indices] <-
+      ecdna$ecdna_recorder_edit_fraction[source_indices]
+  }
   metadata
 }
 
+#' Rename simulated cell types to their reference-model equivalents
+#'
+#' Simulated PhysiCell labels rarely match the reference's cell-type levels, and
+#' `scdesign3_new_covariates()` rejects levels the reference does not know. This
+#' rewrites `cell_type` in place through the supplied map while preserving the
+#' original label in `cell_type_sim`. Labels absent from the map are left
+#' unchanged.
+#'
+#' @param metadata Covariate data frame carrying a `cell_type` column.
+#' @param celltype_map Named vector, or named list flattened with `unlist()`,
+#'   mapping simulated label to reference label; every element must be named.
+#'   `NULL` returns `metadata` untouched with no `cell_type_sim` column added.
+#' @return `metadata` with `cell_type` remapped and a `cell_type_sim` column
+#'   holding the pre-mapping labels for every row.
 apply_physicell_celltype_map <- function(metadata, celltype_map){
   if(is.null(celltype_map)){
     return(metadata)
@@ -377,6 +522,18 @@ apply_physicell_celltype_map <- function(metadata, celltype_map){
   metadata
 }
 
+#' Linearly rescale a simulated covariate onto the reference's observed range
+#'
+#' Maps the min/max of `values` onto the min/max of `reference_values` so the
+#' simulated predictor stays inside the support the marginal model was fitted
+#' over, avoiding extrapolation of the fitted smooth terms.
+#'
+#' @param values Simulated covariate; must be finite after numeric coercion.
+#' @param reference_values Reference covariate defining the target range; must
+#'   be finite after numeric coercion.
+#' @return A numeric vector as long as `values`. When the reference range is
+#'   degenerate every element is that single reference value; when the input
+#'   range is degenerate every element is the midpoint of the reference range.
 scale_physicell_covariate_to_reference <- function(values, reference_values){
   values <- as.numeric(values)
   reference_values <- as.numeric(reference_values)
@@ -395,6 +552,24 @@ scale_physicell_covariate_to_reference <- function(values, reference_values){
     (values - value_range[1]) / diff(value_range) * diff(reference_range)
 }
 
+#' Rescale simulated pseudotime and spatial predictors to reference ranges
+#'
+#' Reads the reference `colData` and rewrites the requested predictors with
+#' `scale_physicell_covariate_to_reference()`. The reference must already be
+#' standardized by `load_scdesign3_reference()`, which is what creates the
+#' `pseudotime`, `spatial1`, and `spatial2` columns this reads.
+#'
+#' @param metadata Covariate data frame from `build_physicell_sc_covariates()`.
+#' @param reference_sce Standardized reference `SingleCellExperiment` (rows are
+#'   genes, columns are cells); only its `colData` is used.
+#' @param use_pseudotime When `TRUE`, rescale `metadata$pseudotime` onto the
+#'   reference `pseudotime` range.
+#' @param use_spatial When `TRUE`, derive `spatial1` from `metadata$x` and
+#'   `spatial2` from `metadata$y`, each rescaled onto the matching reference
+#'   coordinate range.
+#' @return `metadata` with the rescaled `pseudotime` and/or newly added
+#'   `spatial1`/`spatial2` columns. With both flags `FALSE` it is returned
+#'   unchanged.
 align_physicell_sc_covariates <- function(metadata,
                                           reference_sce,
                                           use_pseudotime = FALSE,
@@ -421,6 +596,35 @@ align_physicell_sc_covariates <- function(metadata,
   metadata
 }
 
+#' Write the simulated expression matrix, metadata, and run manifest
+#'
+#' Packages the simulated counts and their covariates into a
+#' `SingleCellExperiment` and writes the artifacts the downstream analysis
+#' scripts read. Does not require `scDesign3` itself, only the Bioconductor
+#' container packages.
+#'
+#' @param counts Simulated count matrix in genes x cells orientation, as
+#'   returned by `simulate_scdesign3_counts()`: rows are genes (row names from
+#'   the reference), columns are cells named by `sample_id`. It is converted to
+#'   a sparse `Matrix` when the `Matrix` package is available.
+#' @param metadata Covariate data frame with one row per column of `counts` and
+#'   a `sample_id` column, which becomes the `colData` row names.
+#' @param output_dir Destination directory, created recursively if needed.
+#' @param fit The scDesign3 fit list; `scdesign3_version`, `mu_formula`,
+#'   `use_pseudotime`, `use_spatial`, and `other_covariates` are recorded in the
+#'   manifest.
+#' @param reference_path Path to the reference dataset, normalized into the
+#'   manifest as provenance; must exist.
+#' @param seed Random seed recorded in the manifest for provenance only — this
+#'   function does not set or consume it.
+#' @param compress_csv When `TRUE` (the default) the CSV outputs are gzipped.
+#' @return Invisibly, the assembled `SingleCellExperiment`.
+#' @section Side effects:
+#' Creates `output_dir` and writes `sim_sce_final.rds` (the
+#' `SingleCellExperiment`), `simulated_counts.rds` (the count matrix alone),
+#' `cell_metadata.csv`, `cell_count_summary.csv` (cells per `cell_type`), and
+#' `scdesign3_manifest.csv`, where `num_cells` is `ncol(counts)` and
+#' `num_features` is `nrow(counts)`.
 write_physicell_scdesign3_outputs <- function(counts,
                                                metadata,
                                                output_dir,

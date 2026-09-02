@@ -1,6 +1,94 @@
 #!/usr/bin/env Rscript
 
+# Command-line driver that turns a finished PhysiCell run into simulated
+# lineage-recorder data.
+#
+# Pipeline position: PhysiCell writes a division-event CSV (and optionally a
+# live-cell CSV); this script replays those events into an event-resolved
+# lineage table, writes the ground-truth lineage, and then layers the requested
+# recording modalities (barcode, mitochondrial, ecDNA) on top of that lineage.
+# Downstream analysis (physicell_visium.R, the scdesign3 helpers, the benchmark
+# scripts) consumes the tables written here.
+#
+# Loads prime_editing.R, physicell_lineage.R, physicell_mito.R, and
+# ecdna_lineage.R from the directory holding this script. The jsonlite package
+# is required to read the parameter JSON; the Matrix package is additionally
+# required when both the barcode and mitochondrial modalities are requested.
+#
+# Command-line arguments
+#   -L, --lineage PATH        Required. PhysiCell division CSV with time,
+#                             parent_ID, and daughter_ID columns.
+#   -P, --params PATH         Required. remote_mito JSON parameter file.
+#   -O, --output-dir PATH     Destination directory; created if absent.
+#                             Default <repo>/output/physicell/<lineage stem>.
+#       --end-time NUMBER     Sampling time of the terminal cells. Default is
+#                             the maximum sim_length found in the JSON.
+#       --founder-time NUMBER Birth time of the founder segments. Default 0.
+#       --founders PATH       Optional CSV listing every day-zero founder ID.
+#       --live-cells PATH     Optional PhysiCell live-cell CSV with an ID
+#                             column; restricts which terminal cells are
+#                             sampled and simulated.
+#       --cell-type NAME      Cell type whose rates are read from the JSON.
+#                             Default founder_cell_type.
+#       --editing-state STATE auto, induced, or uninduced. Default auto, which
+#                             splits branches at the model's induction time.
+#       --modalities LIST     Comma-separated selection of lineage, barcode,
+#                             mitochondrial, ecDNA, both (barcode plus
+#                             mitochondrial), or all. Default barcode; the
+#                             alias mito maps to mitochondrial.
+#       --num-integrations N  Barcode integrations per cell. Default is the
+#                             maximum max_bc_ints_per_cell in the JSON.
+#       --founder-label-sites N  Stable allele-coded founder barcode sites.
+#                             Default 0.
+#       --mt-genomes-per-cell N  Fixed mitochondrial bottleneck size.
+#                             Default 8.
+#       --write-mt-fasta BOOL Write one sampled mt haplotype per cell.
+#                             Default false.
+#       --compress-csv BOOL   Write CSV tables as .csv.gz. Default true.
+#       --progress BOOL       Emit stage and progress logging. Default true.
+#       --progress-updates N  Approximate progress updates per phase.
+#                             Default 20; must be a positive integer.
+#       --seed N              Base RNG seed. Default 1. The ecDNA model uses
+#                             seed + 5 and the ecDNA simulation seed + 6.
+#   -h, --help                Print the usage block and exit with status 0.
+#
+# Inputs read: the --lineage CSV, the --params JSON, the optional --founders
+# and --live-cells CSVs, and any barcode-reference file the JSON names relative
+# to the parameter file's own directory.
+#
+# Outputs, all under the resolved output directory. Every .csv below is written
+# as .csv.gz unless --compress-csv false is passed.
+#   always            lineage_nodes.csv, terminal_cells.csv,
+#                     physicell_lineage_full.nwk,
+#                     physicell_lineage_sampled.nwk, r_timing_summary.csv
+#   barcode           mutation_events.csv, barcode_target_layout.csv,
+#                     barcode_profiles.rds, run_manifest.csv, plus the dense or
+#                     sparse allele/score/character matrices belonging to the
+#                     configured recorder and any optional FASTA files
+#   mitochondrial     mitochondrial_mutation_events.csv,
+#                     mitochondrial_variant_fractions.csv,
+#                     mitochondrial_profiles.rds,
+#                     mitochondrial_reference.fasta,
+#                     mitochondrial_manifest.csv, the optional sparse
+#                     variant-fraction matrix, and
+#                     mitochondrial_sampled_haplotypes.fasta when
+#                     --write-mt-fasta true
+#   ecDNA             ecdna_manifest.csv, ecdna_mutation_events.csv,
+#                     ecdna_cell_summary.csv, ecdna_haplotypes.csv,
+#                     ecdna_species_manifest.csv,
+#                     ecdna_terminal_profiles.rds, and the ecDNA sparse
+#                     static-ID / recorder matrices
+#   barcode or mt     mutation_event_descendant_matrix_sparse.rds and
+#                     mutation_event_descendant_manifest.csv
+#   barcode and mt    combined_lineage_feature_matrix.rds and
+#                     combined_lineage_feature_manifest.csv, with the ecDNA
+#                     feature blocks appended when ecDNA also ran
+#
+# The last stdout line is OUTPUT_DIR=<path>, which the bash wrappers parse.
+
 r_simulator_start_time <- unname(proc.time()[['elapsed']])
+
+# ---- Bootstrap: locate the repository root and load simulator modules ----
 
 script_argument <- commandArgs(trailingOnly = FALSE)[
   grepl('^--file=', commandArgs(trailingOnly = FALSE))
@@ -10,9 +98,18 @@ script_path <- normalizePath(
   mustWork = TRUE
 )
 repo_root <- dirname(script_path)
+source(file.path(repo_root, 'prime_editing.R'))
 source(file.path(repo_root, 'physicell_lineage.R'))
 source(file.path(repo_root, 'physicell_mito.R'))
+source(file.path(repo_root, 'ecdna_lineage.R'))
 
+# ---- Command-line interface ----
+
+#' Build this script's command-line usage text
+#'
+#' @return One string containing the newline-separated usage block: the
+#'   invocation line, the two required arguments, and every supported option
+#'   with its default.
 physicell_cli_usage <- function(){
   paste(
     'Usage:',
@@ -30,7 +127,10 @@ physicell_cli_usage <- function(){
     '      --live-cells PATH       Optional PhysiCell live-cell CSV with an ID column',
     '      --cell-type NAME        Default: founder_cell_type',
     '      --editing-state STATE   auto, induced, or uninduced; default: auto',
-    '      --modalities LIST       barcode, mitochondrial, or both; default: barcode',
+    paste(
+      '      --modalities LIST       lineage, barcode, mitochondrial, ecDNA,',
+      'both, or all; default: barcode'
+    ),
     '      --num-integrations N    Default: maximum max_bc_ints_per_cell',
     '      --founder-label-sites N Stable allele-coded founder barcode sites; default: 0',
     '      --mt-genomes-per-cell N Fixed mitochondrial bottleneck size; default: 8',
@@ -44,6 +144,32 @@ physicell_cli_usage <- function(){
   )
 }
 
+#' Parse and validate the trailing command-line arguments
+#'
+#' Walks the arguments left to right, accepting both `--flag value` and
+#' `--flag=value` (everything after the first `=` is the value). Flags are
+#' resolved through a short/long alias table; an unrecognised flag, a flag with
+#' no value, or a value that fails its numeric, integer, or true/false
+#' coercion raises an error, and the unknown-option error embeds the usage
+#' text. Later occurrences of the same flag overwrite earlier ones.
+#'
+#' @param arguments Character vector of trailing command-line arguments, as
+#'   returned by `commandArgs(trailingOnly = TRUE)`.
+#' @return A named list of options with defaults filled in: `lineage`,
+#'   `params`, and `output_dir` (`NULL` until supplied), `end_time`
+#'   (`NA_real_`), `founder_time` (`0`), `founders` and `live_cells` (`NULL`),
+#'   `cell_type` (`NULL`), `editing_state` (`'auto'`), `modalities`
+#'   (`'barcode'`), `num_integrations` (`NA_integer_`), `founder_label_sites`
+#'   (`0`), `mt_genomes_per_cell` (`8`), `write_mt_fasta` (`FALSE`),
+#'   `compress_csv` (`TRUE`), `progress` (`TRUE`), `progress_updates` (`20`),
+#'   and `seed` (`1`). Path options are returned as given, not normalized.
+#' @note Only `progress_updates >= 1` is checked here. That `--lineage` and
+#'   `--params` were supplied, that the paths exist, and that `--modalities`
+#'   names known modalities are checked later by the top-level script;
+#'   `--editing-state` is validated further downstream, by the per-branch
+#'   mutators in `physicell_lineage.R`.
+#' @section Side effects: `-h`/`--help` prints the usage text and calls
+#'   `quit(status = 0)`, ending the session rather than returning.
 parse_physicell_cli_args <- function(arguments){
   options <- list(
     lineage = NULL,
@@ -148,6 +274,24 @@ parse_physicell_cli_args <- function(arguments){
   options
 }
 
+# ---- Phase timing ----
+
+#' Create a wall-clock recorder for the simulator's sequential phases
+#'
+#' Phases are contiguous rather than independent: each `finish_phase()` call
+#' closes the interval that began when the recorder was created or when the
+#' previous phase finished, so the recorded phases partition the whole run and
+#' their durations sum to the total. All durations are elapsed (wall) seconds,
+#' not CPU seconds.
+#'
+#' @param total_start Elapsed-seconds timestamp marking the start of the run,
+#'   on the same scale as `clock`. Must be one finite number; defaults to
+#'   `clock()` evaluated at construction time.
+#' @param clock Zero-argument function returning the current elapsed seconds;
+#'   defaults to `proc.time()[['elapsed']]`. It must return one finite value
+#'   that never decreases between calls.
+#' @return A named list of two closures, `finish_phase` and `summary`, sharing
+#'   the recorder's accumulated phase table.
 new_physicell_timing_recorder <- function(
     total_start = NULL,
     clock = function(){
@@ -163,6 +307,13 @@ new_physicell_timing_recorder <- function(
   phase_start <- total_start
   phase_timings <- setNames(numeric(), character())
 
+  #' Internal: close the running phase and record its elapsed time
+  #'
+  #' @param label One non-empty string naming the phase; must not repeat a
+  #'   label already recorded.
+  #' @return Invisibly, the phase duration in seconds.
+  #' @section Side effects: Appends the labelled duration to the enclosing
+  #'   recorder's `phase_timings` and advances its `phase_start`.
   finish_phase <- function(label){
     label <- as.character(label)
     if(length(label) != 1 || is.na(label) || !nzchar(label)){
@@ -184,6 +335,16 @@ new_physicell_timing_recorder <- function(
     invisible(duration)
   }
 
+  #' Internal: summarise every recorded phase plus the total runtime
+  #'
+  #' Reads the clock without closing a phase, so any work done since the last
+  #' `finish_phase()` call is counted only in the total row.
+  #'
+  #' @return A data frame with one row per recorded phase followed by a
+  #'   `Total R simulator` row, and columns `phase`, `elapsed_seconds`
+  #'   (rounded to six decimals), `elapsed` (a compact label from
+  #'   `format_physicell_progress_duration()`), and `percent_of_total`, which
+  #'   is `0` for every row when the total duration is not positive.
   summary <- function(){
     now <- as.numeric(clock())
     if(length(now) != 1 || !is.finite(now) || now < phase_start){
@@ -217,6 +378,14 @@ new_physicell_timing_recorder <- function(
   )
 }
 
+#' Format a timing summary as aligned terminal and log lines
+#'
+#' @param timing_summary Data frame carrying at least the `phase` and
+#'   `elapsed` columns produced by a timing recorder's `summary()`, with one
+#'   or more rows.
+#' @return A character vector: an `R simulator timing summary:` heading
+#'   followed by one indented line per row, whose `phase:` labels are padded
+#'   to a common width so the elapsed values line up.
 format_physicell_timing_summary <- function(timing_summary){
   required <- c('phase', 'elapsed')
   if(!is.data.frame(timing_summary) ||
@@ -236,6 +405,8 @@ format_physicell_timing_summary <- function(timing_summary){
     )
   )
 }
+
+# ---- Parse arguments and read the PhysiCell and parameter inputs ----
 
 options <- parse_physicell_cli_args(commandArgs(trailingOnly = TRUE))
 timing_recorder <- new_physicell_timing_recorder(
@@ -278,6 +449,11 @@ supplied_founder_ids <- if(is.null(founders_path)){
   read_physicell_founder_ids(founders_path)
 }
 
+# ---- Reconstruct the event-resolved lineage ----
+# The founders are taken from --founders when supplied. When no divisions were
+# recorded the live cells themselves become the founders; otherwise the
+# founders are inferred from the division events.
+
 end_time <- options$end_time
 if(is.na(end_time)){
   end_time <- max(as.numeric(unlist(params$sim_length, use.names = FALSE)))
@@ -315,6 +491,10 @@ physicell_log_stage(
   enabled = options$progress
 )
 
+# ---- Resolve the output directory and the requested modalities ----
+# `both` expands to barcode plus mitochondrial, `all` adds ecDNA, and `mito`
+# is accepted as an alias for `mitochondrial`.
+
 if(is.null(options$output_dir)){
   lineage_stem <- tools::file_path_sans_ext(basename(lineage_path))
   options$output_dir <- file.path(
@@ -332,17 +512,38 @@ requested_modalities <- tolower(trimws(unlist(strsplit(
   fixed = TRUE
 ))))
 if('both' %in% requested_modalities){
-  requested_modalities <- c('barcode', 'mitochondrial')
+  requested_modalities <- c(
+    requested_modalities[requested_modalities != 'both'],
+    'barcode',
+    'mitochondrial'
+  )
+}
+if('all' %in% requested_modalities){
+  requested_modalities <- c(
+    requested_modalities[requested_modalities != 'all'],
+    'barcode',
+    'mitochondrial',
+    'ecdna'
+  )
 }
 requested_modalities[requested_modalities == 'mito'] <- 'mitochondrial'
+requested_modalities[requested_modalities == 'ecdna'] <- 'ecdna'
 requested_modalities <- unique(requested_modalities)
 unknown_modalities <- setdiff(
   requested_modalities,
-  c('barcode', 'mitochondrial')
+  c('lineage', 'barcode', 'mitochondrial', 'ecdna')
 )
 if(length(requested_modalities) == 0 || length(unknown_modalities) > 0){
-  stop('--modalities must contain barcode, mitochondrial, or both.')
+  stop(paste(
+    '--modalities must contain lineage, barcode, mitochondrial, ecDNA,',
+    'both, or all.'
+  ))
 }
+
+# ---- Select terminal cells and write the ground-truth lineage output ----
+# Writes lineage_nodes.csv, terminal_cells.csv, physicell_lineage_full.nwk,
+# and physicell_lineage_sampled.nwk. `--modalities lineage` alone stops the
+# run after this section apart from the timing summary.
 
 terminal_node_table <- nodes[nodes$is_terminal, , drop = FALSE]
 if(!is.null(terminal_ids)){
@@ -364,6 +565,10 @@ write_physicell_lineage_outputs(
   compress_csv = options$compress_csv
 )
 timing_recorder$finish_phase('Lineage tables and Newick output')
+
+# ---- Barcode recording modality ----
+# Prepares the recorder model from the JSON, replays it over every branch, and
+# writes the barcode events, target layout, profiles, and score matrices.
 
 barcode_simulation <- NULL
 barcode_output <- NULL
@@ -437,6 +642,10 @@ if('barcode' %in% requested_modalities){
   timing_recorder$finish_phase('Barcode output')
 }
 
+# ---- Mitochondrial recording modality ----
+# Propagates a fixed --mt-genomes-per-cell bottleneck along the same lineage
+# and writes the mt events, variant fractions, profiles, and reference.
+
 mitochondrial_simulation <- NULL
 mitochondrial_output <- NULL
 if('mitochondrial' %in% requested_modalities){
@@ -501,6 +710,65 @@ if('mitochondrial' %in% requested_modalities){
   timing_recorder$finish_phase('Mitochondrial output')
 }
 
+# ---- ecDNA recording modality ----
+# Non-Mendelian ecDNA propagation plus its CRISPR recorder. Uses offset seeds
+# (--seed + 5 for the model, --seed + 6 for the simulation) and samples the
+# terminal cells already chosen above.
+
+ecdna_simulation <- NULL
+ecdna_output <- NULL
+if('ecdna' %in% requested_modalities){
+  physicell_log_stage(
+    'Preparing non-Mendelian ecDNA barcode model.',
+    enabled = options$progress
+  )
+  ecdna_model <- prepare_ecdna_model(params, seed = options$seed + 5L)
+  timing_recorder$finish_phase('ecDNA model preparation')
+  physicell_log_stage(
+    sprintf(
+      'Starting ecDNA propagation and recorder simulation across %s nodes.',
+      format(nrow(nodes), big.mark = ',', scientific = FALSE, trim = TRUE)
+    ),
+    enabled = options$progress
+  )
+  ecdna_simulation <- simulate_ecdna_on_lineage(
+    nodes,
+    ecdna_model,
+    terminal_physicell_ids = terminal_node_table$physicell_id,
+    seed = options$seed + 6L,
+    show_progress = options$progress,
+    progress_updates = options$progress_updates
+  )
+  timing_recorder$finish_phase('ecDNA lineage simulation')
+  physicell_log_stage(
+    sprintf(
+      paste(
+        'ecDNA lineage simulation finished with %s aggregated edit rows;',
+        'beginning output.'
+      ),
+      format(
+        nrow(ecdna_simulation$mutation_events),
+        big.mark = ',',
+        scientific = FALSE,
+        trim = TRUE
+      )
+    ),
+    enabled = options$progress
+  )
+  ecdna_output <- write_ecdna_outputs(
+    ecdna_simulation,
+    ecdna_model,
+    options$output_dir,
+    show_progress = options$progress,
+    compress_csv = options$compress_csv
+  )
+  timing_recorder$finish_phase('ecDNA output')
+}
+
+# ---- Mutation-event descendant matrix ----
+# Written whenever at least one of the barcode or mitochondrial simulations
+# ran; ecDNA events are not included here.
+
 event_tables <- list()
 if(!is.null(barcode_simulation)){
   event_tables$barcode <- barcode_simulation$mutation_events
@@ -508,16 +776,24 @@ if(!is.null(barcode_simulation)){
 if(!is.null(mitochondrial_simulation)){
   event_tables$mitochondrial <- mitochondrial_simulation$mutation_events
 }
-write_physicell_event_descendant_outputs(
-  nodes,
-  terminal_node_table,
-  event_tables,
-  options$output_dir,
-  show_progress = options$progress,
-  progress_updates = options$progress_updates,
-  compress_csv = options$compress_csv
-)
-timing_recorder$finish_phase('Mutation-event descendant matrix output')
+if(length(event_tables) > 0L){
+  write_physicell_event_descendant_outputs(
+    nodes,
+    terminal_node_table,
+    event_tables,
+    options$output_dir,
+    show_progress = options$progress,
+    progress_updates = options$progress_updates,
+    compress_csv = options$compress_csv
+  )
+  timing_recorder$finish_phase('Mutation-event descendant matrix output')
+}
+
+# ---- Combined feature matrix ----
+# Only when both barcode and mitochondrial data exist. The mitochondrial (and,
+# if present, ecDNA) rows are reordered to the barcode row order before the
+# column blocks are bound together; a terminal sample ID missing from any
+# block is a fatal mismatch.
 
 if(all(c('barcode', 'mitochondrial') %in% requested_modalities) &&
    !is.null(barcode_output) && !is.null(mitochondrial_output)){
@@ -558,6 +834,46 @@ if(all(c('barcode', 'mitochondrial') %in% requested_modalities) &&
     enabled = options$progress
   )
   combined_features <- cbind(barcode_features, mitochondrial_features)
+  combined_modalities <- c(
+    rep('barcode', ncol(barcode_features)),
+    rep('mitochondrial', ncol(mitochondrial_features))
+  )
+  combined_systems <- c(
+    rep(barcode_model$recorder_system, ncol(barcode_features)),
+    rep('mitochondrial lineage tracing', ncol(mitochondrial_features))
+  )
+  if(!is.null(ecdna_output)){
+    ecdna_recorder_features <- ecdna_output$recorder_edit_presence
+    ecdna_static_features <- ecdna_output$static_id_copy_numbers
+    ecdna_indices <- match(
+      rownames(combined_features),
+      rownames(ecdna_recorder_features)
+    )
+    if(anyNA(ecdna_indices)){
+      stop('ecDNA and barcode/mitochondrial terminal sample IDs do not match.')
+    }
+    ecdna_recorder_features <- ecdna_recorder_features[
+      ecdna_indices, , drop = FALSE
+    ]
+    ecdna_static_features <- ecdna_static_features[
+      ecdna_indices, , drop = FALSE
+    ]
+    combined_features <- cbind(
+      combined_features,
+      ecdna_recorder_features,
+      ecdna_static_features
+    )
+    combined_modalities <- c(
+      combined_modalities,
+      rep('ecdna_recorder', ncol(ecdna_recorder_features)),
+      rep('ecdna_static_id_copy_number', ncol(ecdna_static_features))
+    )
+    combined_systems <- c(
+      combined_systems,
+      rep('ecDNA CRISPR recorder', ncol(ecdna_recorder_features)),
+      rep('ecDNA static ID', ncol(ecdna_static_features))
+    )
+  }
   saveRDS(
     combined_features,
     file.path(options$output_dir, 'combined_lineage_feature_matrix.rds')
@@ -568,14 +884,8 @@ if(all(c('barcode', 'mitochondrial') %in% requested_modalities) &&
   )
   feature_manifest <- data.frame(
     feature = colnames(combined_features),
-    modality = c(
-      rep('barcode', ncol(barcode_features)),
-      rep('mitochondrial', ncol(mitochondrial_features))
-    ),
-    recorder_system = c(
-      rep(barcode_model$recorder_system, ncol(barcode_features)),
-      rep('mitochondrial lineage tracing', ncol(mitochondrial_features))
-    ),
+    modality = combined_modalities,
+    recorder_system = combined_systems,
     stringsAsFactors = FALSE
   )
   write_physicell_csv(
@@ -590,6 +900,10 @@ if(all(c('barcode', 'mitochondrial') %in% requested_modalities) &&
   )
   timing_recorder$finish_phase('Combined lineage output')
 }
+
+# ---- Timing summary and stdout report ----
+# Writes r_timing_summary.csv, prints the per-phase timing table, and ends with
+# the OUTPUT_DIR=<path> line the wrapper scripts parse.
 
 written_output_dir <- normalizePath(options$output_dir, mustWork = TRUE)
 physicell_log_stage(
@@ -610,11 +924,18 @@ timing_summary_path <- write_physicell_csv(
 
 cat(sprintf('Imported %d PhysiCell divisions into %d event-resolved nodes.\n',
             nrow(division_events), nrow(nodes)))
-cat(sprintf(
-  'Generated %s recording data for %d terminal cells.\n',
-  paste(requested_modalities, collapse = ' + '),
-  nrow(terminal_node_table)
-))
+if(identical(requested_modalities, 'lineage')){
+  cat(sprintf(
+    'Generated ground-truth lineage data for %d terminal cells.\n',
+    nrow(terminal_node_table)
+  ))
+} else{
+  cat(sprintf(
+    'Generated %s data for %d terminal cells.\n',
+    paste(requested_modalities, collapse = ' + '),
+    nrow(terminal_node_table)
+  ))
+}
 cat(
   paste(format_physicell_timing_summary(r_timing_summary), collapse = '\n'),
   '\n'

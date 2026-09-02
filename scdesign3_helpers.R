@@ -1,6 +1,13 @@
 # Shared scDesign3 reference loading, model fitting, and conditional simulation.
 # These helpers do not execute a CLI when sourced.
 
+#' Emit a timestamped scDesign3 pipeline-stage message
+#'
+#' @param message_text One non-empty string naming the stage being entered.
+#' @return `TRUE`, invisibly.
+#' @section Side effects:
+#' Writes `[<local timestamp>] <message_text>` to the message connection
+#' (stderr).
 scdesign3_log_stage <- function(message_text){
   message_text <- as.character(message_text)
   if(length(message_text) != 1 || is.na(message_text) ||
@@ -15,6 +22,18 @@ scdesign3_log_stage <- function(message_text){
   invisible(TRUE)
 }
 
+#' Parse a comma-delimited CLI value into validated covariate column names
+#'
+#' Splits on commas, trims surrounding whitespace, drops empty entries, and
+#' rejects names that `make.names()` would alter, because the results are pasted
+#' into a model formula.
+#'
+#' @param value Comma-delimited string of column names. `NULL`, zero-length,
+#'   `NA`, and the empty string all yield no columns.
+#' @param expected_length Optional exact count of names required; the call fails
+#'   when the parsed count differs. Checked before de-duplication.
+#' @return A character vector of unique, syntactically valid column names,
+#'   possibly zero-length.
 split_scdesign3_columns <- function(value, expected_length = NULL){
   if(is.null(value) || length(value) == 0 || is.na(value) || !nzchar(value)){
     return(character())
@@ -34,6 +53,40 @@ split_scdesign3_columns <- function(value, expected_length = NULL){
   unique(columns)
 }
 
+#' Load a reference dataset and standardize its scDesign3 predictor columns
+#'
+#' Reads an `.h5ad`, or an `.rds` holding a `SingleCellExperiment` or a `Seurat`
+#' object, and normalizes it into the shape the rest of the pipeline assumes:
+#' an assay literally named `counts` and `colData` columns named `cell_type`,
+#' `pseudotime`, `spatial1`, and `spatial2`. The returned object keeps the
+#' Bioconductor orientation of genes x cells — rows are features, columns are
+#' cells — which is the orientation `fit_or_load_scdesign3()` and
+#' `simulate_scdesign3_counts()` require.
+#'
+#' @details
+#' When no assay is named `counts`, the first assay is aliased to `counts` with
+#' a message; the raw counts the negative-binomial marginals assume are the
+#' caller's responsibility. Source column names are copied into the standard
+#' names rather than renamed, so the originals remain.
+#'
+#' @param path Reference file; `.h5ad` needs `zellkonverter` and a Seurat
+#'   `.rds` needs `Seurat`. Must exist.
+#' @param celltype_col `colData` column holding cell-type labels; copied to
+#'   `cell_type` as a factor whose levels bound what
+#'   `scdesign3_new_covariates()` will later accept. Missing labels fail.
+#' @param pseudotime_col `colData` column holding pseudotime; used only when
+#'   `use_pseudotime` is `TRUE`.
+#' @param use_pseudotime When `TRUE`, copy `pseudotime_col` to `pseudotime`; it
+#'   must be finite and hold at least two distinct values.
+#' @param spatial_cols Either zero or exactly two `colData` column names, copied
+#'   to `spatial1` and `spatial2`; they must be finite and span at least ten
+#'   distinct locations.
+#' @param other_covariates Additional `colData` columns to retain as predictors.
+#'   Character columns become factors; numeric ones must be finite, and none may
+#'   contain `NA`.
+#' @return The standardized `SingleCellExperiment` (genes x cells).
+#' @note Requires `SingleCellExperiment` and `SummarizedExperiment`, but not
+#'   `scDesign3` itself.
 load_scdesign3_reference <- function(path,
                                      celltype_col = 'cell_type',
                                      pseudotime_col = 'pseudotime',
@@ -159,6 +212,25 @@ load_scdesign3_reference <- function(path,
   sce
 }
 
+#' Build the default marginal-mean formula from the standardized reference
+#'
+#' Assembles the right-hand side of the per-gene mean model, including only the
+#' terms the reference can actually support: `cell_type` when more than one
+#' level is present, a pseudotime term when requested, a spatial term when
+#' requested, and any additional covariates verbatim. Pseudotime uses a cubic
+#' regression spline `s(pseudotime, k, bs = "cr")` with `k` capped at 4 and at
+#' one below the number of distinct values, falling back to a linear
+#' `pseudotime` term when fewer than four distinct values exist. Spatial uses a
+#' Gaussian-process smooth `s(spatial1, spatial2, k, bs = "gp")` with `k` set to
+#' one quarter of the reference cell count, clamped to `[5, 50]`.
+#'
+#' @param sce Standardized reference `SingleCellExperiment` (genes x cells);
+#'   `ncol(sce)` is read as the reference cell count.
+#' @param use_pseudotime When `TRUE`, add the pseudotime term.
+#' @param use_spatial When `TRUE`, add the two-dimensional spatial smooth.
+#' @param other_covariates Character vector of extra terms appended as-is.
+#' @return A one-element character formula right-hand side, or `"1"` when no
+#'   term applies (an intercept-only mean model).
 scdesign3_default_mu_formula <- function(sce,
                                          use_pseudotime = FALSE,
                                          use_spatial = FALSE,
@@ -195,6 +267,28 @@ scdesign3_default_mu_formula <- function(sce,
   }
 }
 
+#' Derive a cache key covering everything a fitted scDesign3 model depends on
+#'
+#' Hashes the reference identity (normalized path, mtime, size), the installed
+#' `scDesign3` version, and the full model specification, so that editing the
+#' reference file or changing any predictor choice yields a different key and
+#' forces a refit.
+#'
+#' @param reference_path Path to the reference dataset; must exist.
+#' @param celltype_col Reference cell-type column name.
+#' @param pseudotime_col Reference pseudotime column name.
+#' @param use_pseudotime Whether pseudotime is a predictor.
+#' @param spatial_cols Reference spatial column names, joined with commas.
+#' @param other_covariates Additional predictor names, joined with commas.
+#' @param mu_formula Explicit marginal-mean formula, or `NULL` to record the
+#'   literal `<default>` placeholder.
+#' @param family_use Marginal count family, `'nb'` (negative binomial) by
+#'   default, matching `fit_or_load_scdesign3()`.
+#' @return A single string: a SHA-1 digest when `digest` is installed, otherwise
+#'   an 8-hex-digit fallback checksum of the payload.
+#' @note Uses `scDesign3` only to read its version, recording
+#'   `'not-installed'` when the package is absent, so the key is computable
+#'   without it.
 scdesign3_fit_cache_key <- function(reference_path,
                                     celltype_col,
                                     pseudotime_col,
@@ -232,6 +326,49 @@ scdesign3_fit_cache_key <- function(reference_path,
   }
 }
 
+#' Fit the scDesign3 marginal and copula models, or reuse a cached fit
+#'
+#' Returns a cached fit when `cache_path` holds one carrying every expected
+#' field, otherwise runs the three scDesign3 stages against the reference and
+#' caches the result.
+#'
+#' @details
+#' The fit is fixed to these model choices. `construct_data()` reads the
+#' `counts` assay of `sce` (genes x cells) with `celltype = 'cell_type'` and
+#' `corr_by = '1'`, so all reference cells form a single correlation group.
+#' `fit_marginal()` fits one `family_use` GLM/GAM per gene (`predictor =
+#' 'gene'`) with mean model `mu_formula` and `sigma_formula = '1'`, so the
+#' dispersion is constant across cells within a gene; `usebam = FALSE`.
+#' `fit_copula()` then fits a Gaussian copula (`copula = 'gaussian'`) over the
+#' top 80% of features by expression (`important_feature = 0.8`) with
+#' `if_sparse = FALSE`. All three stages parallelize via `mcmapply`, which is
+#' fork-based and therefore Unix-only.
+#'
+#' @param sce Standardized reference `SingleCellExperiment` from
+#'   `load_scdesign3_reference()`, in genes x cells orientation with a `counts`
+#'   assay.
+#' @param cache_path RDS path read for an existing fit and written on a refit;
+#'   a cache missing any required field is ignored with a message.
+#' @param use_pseudotime When `TRUE`, `pseudotime` is passed to scDesign3 as the
+#'   pseudotime covariate.
+#' @param use_spatial When `TRUE`, `spatial1` and `spatial2` are passed as the
+#'   spatial covariates.
+#' @param other_covariates Additional predictor column names, or a zero-length
+#'   vector for none.
+#' @param mu_formula Marginal-mean formula; `NULL` or empty falls back to
+#'   `scdesign3_default_mu_formula()`.
+#' @param family_use Marginal count distribution passed to both `fit_marginal()`
+#'   and `fit_copula()`; `'nb'` (negative binomial) by default.
+#' @param ncores Worker count for all three stages; must be one positive
+#'   integer.
+#' @return A named list with `sce`, `data` (the `construct_data()` result),
+#'   `marginal_list`, `copula_fit`, `mu_formula`, `family_use`,
+#'   `use_pseudotime`, `use_spatial`, `other_covariates`, and
+#'   `scdesign3_version`.
+#' @section Side effects:
+#' Creates `dirname(cache_path)` and writes the fit to `cache_path` after a
+#' refit; forks worker processes during fitting.
+#' @note Requires the `scDesign3` and `SummarizedExperiment` packages.
 fit_or_load_scdesign3 <- function(sce,
                                   cache_path,
                                   use_pseudotime = FALSE,
@@ -335,6 +472,21 @@ fit_or_load_scdesign3 <- function(sce,
   fit
 }
 
+#' Project simulation metadata onto the fitted model's covariate frame
+#'
+#' Selects exactly the predictor columns the fit was built on (every column of
+#' `fit$data$dat` except `corr_group`) and coerces each to match the reference's
+#' type: factors are rebuilt on the reference levels, and any level the
+#' reference never saw is an error rather than a silent `NA`. `corr_group` is
+#' set to `1` for every cell, matching the single correlation group
+#' `fit_or_load_scdesign3()` fits with `corr_by = '1'`.
+#'
+#' @param fit Fit list from `fit_or_load_scdesign3()`; only `fit$data$dat` is
+#'   read, itself a cells x covariates frame over the reference cells.
+#' @param metadata Target-cell covariate data frame; must contain every
+#'   predictor column, with finite values for the numeric ones.
+#' @return A data frame with one row per row of `metadata`, holding the
+#'   predictor columns in the reference's order and types plus `corr_group`.
 scdesign3_new_covariates <- function(fit, metadata){
   reference_covariates <- fit$data$dat
   predictor_columns <- setdiff(names(reference_covariates), 'corr_group')
@@ -374,6 +526,32 @@ scdesign3_new_covariates <- function(fit, metadata){
   result
 }
 
+#' Simulate a count matrix for target cells from a fitted scDesign3 model
+#'
+#' Evaluates the fitted per-gene marginals at the target covariates with
+#' `extract_para()`, then draws correlated counts with `simu_new()` under the
+#' fitted Gaussian copula.
+#'
+#' @details
+#' The marginal family is whatever the fit was built with (`fit$family_use`,
+#' `'nb'` by default), and the copula, correlation grouping, and important-
+#' feature set are reused from `fit$copula_fit` — none of them can be varied
+#' here. `quantile_mat` is passed as `NULL`, so counts are sampled from the
+#' fitted marginals rather than quantile-matched to observed values, and
+#' `fit$data$filtered_gene` carries through the genes scDesign3 excluded during
+#' fitting. Work is parallelized with `mcmapply`.
+#'
+#' @param fit Fit list from `fit_or_load_scdesign3()`.
+#' @param metadata Target-cell covariate data frame; must carry unique
+#'   non-missing `sample_id` values and every predictor the fit needs.
+#' @param ncores Worker count for both stages; must be one positive integer.
+#' @return A count matrix in genes x cells orientation: rows are the reference
+#'   genes, named by `rownames(fit$sce)`, and columns are the target cells,
+#'   named by `metadata$sample_id`.
+#' @note Calls `scDesign3::extract_para()` and `scDesign3::simu_new()` directly
+#'   with no availability check, so the package must be installed; unlike
+#'   `fit_or_load_scdesign3()` a missing package surfaces as a namespace-load
+#'   error rather than an explanatory message.
 simulate_scdesign3_counts <- function(fit, metadata, ncores = 1){
   ncores <- as.integer(ncores)
   if(length(ncores) != 1 || is.na(ncores) || ncores < 1){

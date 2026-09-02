@@ -1,3 +1,32 @@
+# process_results_from_bash.r
+#
+# Final aggregation step of the sim5_code.R pipeline. Collects the per-tree
+# Robinson-Foulds result files written by compare_trees_call_from_bash.r for one
+# simulation run, recovers each subrun's parameters from the result filename,
+# joins them to the flattened JSON parameters of the run, and writes one wide
+# results table.
+#
+# Invoked by bash_wrapper_all_combos.sh from the repository root as:
+#   Rscript process_results_from_bash.r -I <run_id>
+# Command-line arguments (optparse; both have NULL defaults):
+#   -I / --run_id     run id (numeric string) naming the output/ subdirectories
+#   -J / --json_path  fallback parameter-file path, used only for RF files whose
+#                     recorded parameter path is the literal '.json'. The
+#                     wrapper does not pass this flag.
+#
+# Inputs (paths are relative to the working directory, which must be the repo
+# root so that 'output' resolves):
+#   output/rf_dist_files/<run_id>/*   two-line files: normalized RF distance on
+#                                     line 1, parameter JSON path on line 2
+#   the JSON parameter file named on line 2 of each such file
+#
+# Outputs:
+#   output/param_results_files/<run_id>/stacked_results.csv
+#   output/param_results_files/<run_id>/rf_heatmap.png (only if the unused
+#                                     make_heatmap() helper is called)
+#
+# Requires stringr, ggplot2, rjson, and optparse.
+
 suppressPackageStartupMessages({
   library(stringr)
   library(ggplot2)
@@ -19,6 +48,29 @@ option_list <- list(
 opt_parser <- OptionParser(option_list = option_list, add_help_option = FALSE)
 input_args <- parse_args(opt_parser)
 
+#' Parse per-subrun parameters out of an RF result filename
+#'
+#' Result filenames inherit the naming scheme sim5_code.R uses for processed
+#' profile lists: `proc_<mt|bc>_list_<n>_ints_RP_<recovery prob>_samp_<type-rate
+#' pairs>_<savename>_time_<t>`, with optional `_CD_<T|F>`, `_AF_<threshold>` and
+#' `_B_<T|F>` suffixes added by the score-matrix writer. Each field is pulled
+#' into a local variable of the same name; the requested column names are then
+#' resolved against those locals by `get()`, so a name with no matching field
+#' yields NA rather than an error. A column name starting with the modality
+#' prefix has its first three characters (`mt_` / `bc_`) removed before lookup.
+#'
+#' @param file_name Character scalar: the RF result file name, or the mt/bc half
+#'   of a joint `J_` file name.
+#' @param bc_or_mt Either `'mt'` or `'bc'`; the modality prefix stripped from
+#'   `mat_colnames` before matching.
+#' @param mat_colnames Character vector of column names to fill, in the order
+#'   they should appear in the returned vector.
+#' @param recon_method Reconstruction method (`'fasta'` or `'score'`); returned
+#'   verbatim for the `recon_method` column.
+#' @return A vector the same length as `mat_colnames`, holding the parsed value
+#'   for each name and NA where the filename carries no such field. Sampling
+#'   fractions are collapsed into one `cell_rec_fracs` string of
+#'   `type: rate` entries joined by commas.
 extract_subrun_details <- function(file_name, bc_or_mt, mat_colnames, recon_method){
   
   timept <- str_extract(file_name, '(?<=time_)\\d+(\\.\\d+)?')
@@ -84,6 +136,22 @@ extract_subrun_details <- function(file_name, bc_or_mt, mat_colnames, recon_meth
   
 }
 
+#' Rename numbered transition-matrix columns to source/target cell-type pairs
+#'
+#' `unlist()` on the parsed JSON parameters flattens the uninduced and induced
+#' cell-type transition matrices to columns whose only distinguishing feature is
+#' a trailing index. The cell-type names are recovered from the
+#' `cell_type_dict.cell_type_params.<type>.cell_cycle_length` columns, and the
+#' trailing index of each transition-matrix column is replaced by the
+#' corresponding concatenated source/target pair. The pairs are generated with
+#' `t(outer(...))` so their order matches the row-by-row flattening of the JSON
+#' matrices.
+#'
+#' @param flattened_mat One-row matrix whose column names come from `unlist()`
+#'   of a parsed parameter list.
+#' @return The same matrix with the uninduced and induced transition-matrix
+#'   columns renamed. Errors if either block's column count differs from the
+#'   number of source/target cell-type combinations.
 change_transition_mat_colnames <- function(flattened_mat){
   
   # clean up the uninduced and induced transition matrix labels (everything else is good enough)
@@ -126,10 +194,41 @@ change_transition_mat_colnames <- function(flattened_mat){
   
 }
 
+#' Assemble the stacked results table for one simulation run
+#'
+#' Walks every file in `output/rf_dist_files/<urid>/`. Two filename families are
+#' recognized: single-modality results (`fasta_proc*` / `score_proc*`), whose
+#' modality is read from the `proc_mt` / `proc_bc` token, and joint mt+bc
+#' results (`fasta_J*` / `score_J*`), which are split at `proc_bc` and parsed as
+#' two halves that are then merged element-wise, preferring the non-NA mt value.
+#' Each result file supplies the normalized RF distance (line 1) and the path of
+#' the JSON parameter file that produced it (line 2); accuracy is stored as
+#' `1 - rf_dist`. The flattened parameters of that JSON file, with transition
+#' matrix columns renamed, are bound onto every row.
+#'
+#' @param urid Run id (character) naming the `output/` subdirectory to read.
+#' @return A data frame with one row per recognized RF result file: the parsed
+#'   subrun columns (timepoint, reconstruction method, mt/bc integration,
+#'   recovery, sampling, deletion-collapse, allele-fraction and binarization
+#'   settings), `json_path`, `rf_dist`, `accuracy`, and one column per flattened
+#'   JSON parameter.
+#' @section Side effects: Creates `output/param_results_files/<urid>/` when
+#'   absent and writes `stacked_results.csv` into it. Unrecognized filenames
+#'   raise a warning and are skipped; if nothing is recognized the function
+#'   stops.
 make_results_df <- function(urid){
   
   # helper func for downstream processing of this dataframe
   # split vals by semicolon (and colon, if necessary for target specs)
+  #' Internal: split a compound parameter string into a typed vector
+  #'
+  #' @param joined_val Character scalar whose entries are separated by `;` or
+  #'   `:`; spaces are removed before splitting.
+  #' @param outputted_type `'numeric'` (default), `'integer'`/`'int'`, or any
+  #'   other value to leave the pieces as character.
+  #' @return A vector of the requested type.
+  #' @note Retained helper; nothing in the current `make_results_df` body calls
+  #'   it.
   split_vals <- function(joined_val, outputted_type = 'numeric'){
     no_spaces <- str_replace_all(joined_val, ' ', '')
     
@@ -276,6 +375,22 @@ make_results_df(input_args$run_id)
 
 
   
+#' Plot an accuracy heatmap for one run
+#'
+#' Rebuilds the results table for `run_id` and tiles accuracy over integration
+#' count and cell recovery rate, faceted by integration recovery probability and
+#' timepoint.
+#'
+#' @param run_id Run id (character) passed straight to `make_results_df()`.
+#' @return The value returned by `ggsave()`; called for its side effect.
+#' @section Side effects: Writes
+#'   `output/param_results_files/<run_id>/rf_heatmap.png`. Because it calls
+#'   `make_results_df()`, it also rewrites that run's `stacked_results.csv`.
+#' @note Legacy helper: it is not called from this script's CLI path, and the
+#'   columns it references (`num_ints`, `cell_rec_rate`, `int_recovery_prob`,
+#'   `timepoint`) are not the ones `make_results_df()` currently emits
+#'   (`max_ints`, `cell_rec_fracs`, `int_recprob`, `timept`). `ggsave()` is also
+#'   called without `plot = p`, so it saves the last plot rather than `p`.
 make_heatmap <- function(run_id){
   res <- make_results_df(run_id)
   

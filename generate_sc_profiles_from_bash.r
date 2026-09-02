@@ -17,6 +17,32 @@
 #   if (!require("BiocManager")) install.packages("BiocManager")
 #   BiocManager::install(c("scDesign3", "SingleCellExperiment", "zellkonverter"))
 #   install.packages(c("optparse", "rjson", "digest"))
+#
+# Invoked by bash_wrapper_all_combos.sh from the repository root as:
+#   Rscript generate_sc_profiles_from_bash.r -I <run_id> -R <reference> \
+#           --celltype_col <col> [--celltype_map <json>] [--use_pseudotime] \
+#           [--ncores <n>] [--max_cells_per_timepoint <n>]
+# The wrapper always passes -I, -R and --celltype_col, and appends each optional
+# flag only when the matching wrapper option was supplied. -I and -R are
+# required; -O, --cache_dir, --seed and --pseudotime_col are never passed by the
+# wrapper and take the defaults declared in option_list below.
+#
+# Inputs (relative paths resolve against the working directory, which the
+# wrapper sets to the repo root):
+#   output/cell_populations/<run_id>/cell_population_*_time_<t>.rds
+#   the reference dataset named by -R (.rds SCE/Seurat, or .h5ad)
+#   the JSON named by --celltype_map, when supplied
+#   <cache_dir>/fit_<key>.rds, reused when a compatible cached fit is present
+#   scdesign3_helpers.R, sourced from this script's own directory
+#
+# Outputs, written under -O (default output/sc_profiles/<run_id>/):
+#   sim_sce_all.rds         simulated counts + metadata for every cell
+#   sim_sce_time_<t>.rds    one subset per stopping point
+#   cell_metadata.csv       the covariate table used for the simulation
+#   cell_count_summary.csv  cell counts by timepoint, cell type and terminal
+#                           flag
+# plus <cache_dir>/fit_<key>.rds (default output/scdesign3_fits/) whenever a new
+# scDesign3 fit has to be computed.
 
 script_argument <- commandArgs(trailingOnly = FALSE)[
   grepl('^--file=', commandArgs(trailingOnly = FALSE))
@@ -79,6 +105,24 @@ dir.create(opt$output_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(opt$cache_dir, recursive = TRUE, showWarnings = FALSE)
 
 # ---- Reference loading --------------------------------------------------------
+#' Load a reference dataset as a standardized SingleCellExperiment
+#'
+#' Accepts an AnnData `.h5ad` (via zellkonverter) or an `.rds` holding either a
+#' `SingleCellExperiment` or a Seurat object, and normalizes it for scDesign3:
+#' the first assay is aliased to `counts` if no `counts` assay exists,
+#' `colData$cell_type` is set to the requested column as a factor, and
+#' `colData$pseudotime` is set as numeric when pseudotime is requested.
+#'
+#' @param path Path to the reference `.rds` or `.h5ad`.
+#' @param celltype_col Name of the `colData` column holding cell-type labels;
+#'   must exist in the reference.
+#' @param pseudotime_col Name of the `colData` column holding pseudotime; only
+#'   required when `use_pseudotime` is TRUE.
+#' @param use_pseudotime Logical; when TRUE the pseudotime column must be
+#'   present and is copied to `colData$pseudotime`.
+#' @return A `SingleCellExperiment` with a `counts` assay and standardized
+#'   `cell_type` (and `pseudotime`) columns. Unsupported file extensions, object
+#'   classes, missing columns, or an assay-free reference raise an error.
 load_reference <- function(path, celltype_col, pseudotime_col, use_pseudotime) {
   suppressPackageStartupMessages({
     library(SingleCellExperiment)
@@ -131,6 +175,13 @@ load_reference <- function(path, celltype_col, pseudotime_col, use_pseudotime) {
 }
 
 # ---- Walk cell_population_*.rds files and build per-cell metadata -------------
+#' List a run's cell-population snapshots in timepoint order
+#'
+#' @param cell_pop_dir Directory holding the simulator's
+#'   `cell_population_<savename>_time_<t>.rds` snapshots for one run.
+#' @return A data frame with `path` (full path) and `timepoint` (numeric, parsed
+#'   from the file name), sorted by increasing timepoint. Errors when the
+#'   directory contains no matching snapshot.
 list_cell_population_files <- function(cell_pop_dir) {
   fs <- list.files(cell_pop_dir,
                    pattern = 'cell_population_.+_time_[0-9.]+\\.rds$',
@@ -143,6 +194,26 @@ list_cell_population_files <- function(cell_pop_dir) {
   data.frame(path = fs[ord], timepoint = tps[ord], stringsAsFactors = FALSE)
 }
 
+#' Build one metadata row per extant leaf cell at every stopping point
+#'
+#' Reads each snapshot and keeps the cells that are both `alive` and `terminal`,
+#' i.e. the leaves of the lineage at that stopping point. Lineage depth is the
+#' number of `_`-separated segments in the cell's lineage string minus one, so a
+#' founder has depth 0. Because a lineage can still be a leaf at several
+#' stopping points, `cell_id` repeats across rows and `sample_id` is the unique
+#' per-observation identifier used for matrix column names.
+#'
+#' @param cellpop_files Data frame of snapshot `path`/`timepoint` pairs, as
+#'   returned by `list_cell_population_files()`.
+#' @param celltype_map Optional named list mapping simulator cell types
+#'   (`ct1`, `ct2`, ...) to reference labels. When given, `cell_type` holds the
+#'   mapped label and `cell_type_sim` preserves the simulator's own.
+#' @return A data frame with one row per living leaf cell per stopping point:
+#'   `cell_id` (lineage string), `cell_type`, `lineage_depth`, `birth_time`,
+#'   `induced_editing`, `timepoint`, `is_terminal` (TRUE for rows from the last
+#'   stopping point, not the simulator's per-cell terminal flag), `sample_id`,
+#'   and `cell_type_sim` when a map was applied. Errors when no snapshot holds a
+#'   living leaf cell.
 build_covariate_df <- function(cellpop_files, celltype_map = NULL) {
   per_tp <- lapply(seq_len(nrow(cellpop_files)), function(i) {
     cp <- readRDS(cellpop_files$path[i])
@@ -191,12 +262,25 @@ build_covariate_df <- function(cellpop_files, celltype_map = NULL) {
   meta
 }
 
+#' Add lineage depth rescaled to [0, 1] as a pseudotime covariate
+#'
+#' @param meta Cell metadata carrying a `lineage_depth` column.
+#' @return `meta` with a `pseudotime` column holding depth divided by the
+#'   maximum depth, or 0 for every row when the maximum depth is 0.
 add_pseudotime <- function(meta) {
   max_depth <- max(meta$lineage_depth, na.rm = TRUE)
   meta$pseudotime <- if (max_depth == 0) 0 else meta$lineage_depth / max_depth
   meta
 }
 
+#' Cap the number of simulated cells per stopping point
+#'
+#' @param meta Cell metadata with a `timepoint` column.
+#' @param max_per_tp Maximum rows to keep per timepoint, or NA for no cap.
+#' @return `meta` unchanged when `max_per_tp` is NA, otherwise the rows
+#'   regrouped by timepoint with each over-sized group reduced to a random
+#'   subset of `max_per_tp` rows. Row order follows the split by timepoint, and
+#'   the sampling depends on the seed set at script start.
 maybe_downsample <- function(meta, max_per_tp) {
   if (is.na(max_per_tp)) return(meta)
   do.call(rbind, lapply(split(meta, meta$timepoint), function(sub) {
@@ -206,6 +290,18 @@ maybe_downsample <- function(meta, max_per_tp) {
 }
 
 # ---- scDesign3 fit (cached) and simulate --------------------------------------
+#' Compute the cache key identifying an scDesign3 fit of this reference
+#'
+#' Thin wrapper over `scdesign3_fit_cache_key()` from `scdesign3_helpers.R`,
+#' which keys on the reference's resolved path, modification time and size, the
+#' installed scDesign3 version, and the covariate choices below.
+#'
+#' @param ref_path Path to the reference dataset; must exist.
+#' @param celltype_col Reference cell-type column used for the fit.
+#' @param use_pseudotime Logical; whether pseudotime enters the model.
+#' @param pseudotime_col Reference pseudotime column.
+#' @return A character key (SHA-1 when `digest` is installed, otherwise a
+#'   deterministic fallback) used to name the cached fit file.
 ref_cache_key <- function(ref_path, celltype_col, use_pseudotime, pseudotime_col) {
   scdesign3_fit_cache_key(
     ref_path,
@@ -215,6 +311,22 @@ ref_cache_key <- function(ref_path, celltype_col, use_pseudotime, pseudotime_col
   )
 }
 
+#' Reuse a cached scDesign3 fit, or fit the reference and cache it
+#'
+#' Thin wrapper over `fit_or_load_scdesign3()` from `scdesign3_helpers.R`.
+#'
+#' @param sce Standardized reference `SingleCellExperiment` from
+#'   `load_reference()`.
+#' @param cache_path Path of the cached fit `.rds` for this reference and
+#'   covariate choice.
+#' @param use_pseudotime Logical; adds a smooth pseudotime term to the default
+#'   marginal-mean formula.
+#' @param ncores Positive integer count of workers for marginal and copula
+#'   fitting.
+#' @return The fit list (`sce`, `data`, `marginal_list`, `copula_fit`,
+#'   `mu_formula`, `family_use`, and the covariate flags).
+#' @section Side effects: When no compatible cache exists, the helper fits the
+#'   model and writes it to `cache_path`, creating that directory if needed.
 fit_or_load <- function(sce, cache_path, use_pseudotime, ncores) {
   fit_or_load_scdesign3(
     sce,
@@ -224,6 +336,17 @@ fit_or_load <- function(sce, cache_path, use_pseudotime, ncores) {
   )
 }
 
+#' Simulate counts for the simulator-derived covariates
+#'
+#' Thin wrapper over `simulate_scdesign3_counts()` from `scdesign3_helpers.R`.
+#'
+#' @param fit Fit list returned by `fit_or_load()`.
+#' @param new_meta Target cell metadata; must carry unique, non-missing
+#'   `sample_id` values and cell types the fit knows about.
+#' @param ncores Positive integer count of workers for parameter extraction and
+#'   simulation.
+#' @return A counts matrix with one row per reference feature and one column per
+#'   row of `new_meta`, named by `sample_id`.
 simulate_for_meta <- function(fit, new_meta, ncores) {
   simulate_scdesign3_counts(fit, new_meta, ncores = ncores)
 }

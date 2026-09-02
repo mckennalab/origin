@@ -1,6 +1,38 @@
 # Scalable mitochondrial lineage-recording replay for event-resolved PhysiCell
 # trees. Source physicell_lineage.R before using these functions.
 
+#' Build the mitochondrial hazard set for one cell type and editing state
+#'
+#' Reads the per-cell-cycle (per-division) probabilities configured for
+#' `cell_type` in `editing_state` and converts every one of them into a
+#' continuous-time hazard with `physicell_probability_hazard()`, that is
+#' `-log(1 - p) / cell_cycle_length`. Every `*_hazard` field of the result is
+#' therefore a rate per unit of lineage time (the units `cell_cycle_length` is
+#' expressed in); only `substitution_matrix` is left in per-division
+#' probability space. Positions selected as invariant have their substitution
+#' hazards and their total position hazard zeroed, so they can never be drawn.
+#'
+#' @param params Parsed remote_mito JSON parameter list.
+#' @param cell_type Name of a cell type present in
+#'   `params$cell_type_dict$cell_type_params`; it must carry a positive finite
+#'   `cell_cycle_length` and an `mt_invariant_sites` fraction in `[0, 1]`.
+#' @param editing_state Name of the rate block to read, either
+#'   `'uninduced_editing_params'` or `'induced_editing_params'`; it supplies
+#'   `mt_substitution_model`, `mt_sub_model_params`,
+#'   `mt_bg_insertion_prob_per_division`, and
+#'   `mt_bg_deletion_prob_per_division`, the last two of which must be finite
+#'   and non-negative.
+#' @param mitochondrial_reference Character vector of reference bases, one per
+#'   mt genome position, over `A`, `G`, `C`, `T`.
+#' @return A named list: `substitution_matrix` (4x4 per-division destination
+#'   probabilities, rows and columns ordered `A, G, C, T`),
+#'   `substitution_hazards` (position-by-4 destination hazards),
+#'   `insertion_hazard` and `deletion_hazard` (scalars, uniform across
+#'   positions), `position_hazards` (per-position total event hazard),
+#'   `cumulative_position_hazards` (its `cumsum`, cached for weighted
+#'   sampling), `total_hazard`, `invariant_positions`, and `cell_cycle_length`.
+#' @section Side effects: Draws the invariant-site set with `sample()`, so it
+#'   consumes the random-number stream.
 physicell_mito_rate_set <- function(params,
                                     cell_type,
                                     editing_state,
@@ -109,6 +141,32 @@ physicell_mito_rate_set <- function(params,
   )
 }
 
+#' Prepare the mitochondrial replay model for one cell type
+#'
+#' Draws a uniformly random mt reference sequence of `params$mito_genome_length`
+#' bases and builds both the uninduced and the induced hazard set against that
+#' one reference, so the two states share a reference but each converts its own
+#' per-division probabilities into hazards.
+#'
+#' @param params Parsed remote_mito JSON parameter list.
+#' @param cell_type Cell type whose rate blocks are used; defaults to
+#'   `params$cell_type_dict$founder_cell_type`.
+#' @param genomes_per_cell Fixed number of mt genomes every cell carries and
+#'   that each daughter resamples at division; one positive integer.
+#' @param seed Optional seed set before any random draw in this function.
+#' @return A named list with `mitochondrial_reference` (character vector of
+#'   bases), `mitochondrial_length`, `genomes_per_cell`, `cell_type`,
+#'   `editing_induction_time` (`Inf` when
+#'   `params$editing_induction$timepoint` is missing or non-finite),
+#'   `retain_internal_profiles` (from
+#'   `params$physicell_adapter$retain_internal_profiles`, default `TRUE`),
+#'   `variant_selection_coefficient` (from
+#'   `non_mendelian_selection$mitochondrial_variant_coefficient`), and
+#'   `rate_sets`, a list keyed `uninduced_editing_params` and
+#'   `induced_editing_params`.
+#' @section Side effects: Calls `set.seed()` when `seed` is supplied, and
+#'   consumes the random-number stream for the reference sequence and again for
+#'   each rate set, which samples its own invariant sites independently.
 prepare_physicell_mito_model <- function(params,
                                          cell_type = NULL,
                                          genomes_per_cell = 8,
@@ -164,6 +222,10 @@ prepare_physicell_mito_model <- function(params,
   } else{
     isTRUE(adapter$retain_internal_profiles)
   }
+  variant_selection_coefficient <- non_mendelian_selection_coefficient(
+    params,
+    'mitochondrial_variant_coefficient'
+  )
 
   list(
     mitochondrial_reference = mitochondrial_reference,
@@ -172,10 +234,35 @@ prepare_physicell_mito_model <- function(params,
     cell_type = cell_type,
     editing_induction_time = editing_induction_time,
     retain_internal_profiles = retain_internal_profiles,
+    variant_selection_coefficient = variant_selection_coefficient,
     rate_sets = rate_sets
   )
 }
 
+#' Draw a founder cell's mt genomes and its baseline heteroplasmy
+#'
+#' Every genome starts identical to the reference. A fraction
+#' `params$baseline_heteroplasmy_sites_frac` of positions is chosen without
+#' replacement; each chosen site draws a penetrance from the Beta distribution
+#' whose two shape parameters are given by
+#' `params$baseline_heteroplasmy_variant_frac_dist`, and each genome
+#' independently carries the variant with that probability. A
+#' carried variant is a transition (`A<->G`, `C<->T`) with probability
+#' `params$heteroplasmy_variant_transition_prob`, and otherwise a transversion
+#' drawn uniformly from the two purine/pyrimidine alternatives.
+#'
+#' @param model Prepared model from `prepare_physicell_mito_model()`; supplies
+#'   `genomes_per_cell`, `mitochondrial_length`, and the reference bases.
+#' @param params Parsed remote_mito JSON parameter list; the site fraction, the
+#'   two Beta parameters (both positive), and the transition probability are
+#'   validated here.
+#' @return A list with `profile`, a list of `genomes_per_cell` sparse genomes
+#'   (named numeric vectors whose names are positions as characters and whose
+#'   values are the substituted base codes `1`-`4`), and `events`, a data frame
+#'   with columns `genome`, `position`, `event` (`initial_transition` or
+#'   `initial_transversion`), `reference`, `alternate`, `allele`; zero rows
+#'   when nothing was drawn.
+#' @section Side effects: Consumes the random-number stream.
 initialize_physicell_mito_profile <- function(model, params){
   genomes <- replicate(
     model$genomes_per_cell,
@@ -273,15 +360,73 @@ initialize_physicell_mito_profile <- function(model, params){
   list(profile = genomes, events = events)
 }
 
-inherit_physicell_mito_profile <- function(parent_profile, genomes_per_cell){
-  inherited_indices <- sample(
-    seq_along(parent_profile),
-    genomes_per_cell,
-    replace = TRUE
+#' Resample a daughter cell's mt genomes through the division bottleneck
+#'
+#' Draws `genomes_per_cell` genomes from the parent with replacement, so the
+#' two division products drift independently. With a selection coefficient
+#' `s > 0`, a parental genome carrying `k` recorded variants is weighted
+#' `(1 - s)^k`, penalizing mutation burden; `s = 0` is neutral uniform
+#' sampling. If every weight collapses to zero the draw falls back to a uniform
+#' choice among the lowest-burden genomes.
+#'
+#' @param parent_profile Parent cell's list of sparse mt genomes.
+#' @param genomes_per_cell Number of genomes the daughter receives.
+#' @param variant_selection_coefficient One finite value in `[0, 1]`.
+#' @return A list of `genomes_per_cell` genomes copied from `parent_profile`;
+#'   the same parental genome may be drawn more than once.
+#' @section Side effects: Consumes the random-number stream.
+inherit_physicell_mito_profile <- function(parent_profile,
+                                           genomes_per_cell,
+                                           variant_selection_coefficient = 0){
+  variant_selection_coefficient <- suppressWarnings(
+    as.numeric(variant_selection_coefficient)
   )
+  if(length(variant_selection_coefficient) != 1L ||
+     !is.finite(variant_selection_coefficient) ||
+     variant_selection_coefficient < 0 ||
+     variant_selection_coefficient > 1){
+    stop('variant_selection_coefficient must be one value in [0, 1].')
+  }
+  if(variant_selection_coefficient == 0){
+    inherited_indices <- sample(
+      seq_along(parent_profile),
+      genomes_per_cell,
+      replace = TRUE
+    )
+  } else{
+    variant_burden <- lengths(parent_profile)
+    inheritance_weights <-
+      (1 - variant_selection_coefficient)^variant_burden
+    if(!any(inheritance_weights > 0)){
+      inheritance_weights <- as.numeric(
+        variant_burden == min(variant_burden)
+      )
+    }
+    inherited_indices <- sample(
+      seq_along(parent_profile),
+      genomes_per_cell,
+      replace = TRUE,
+      prob = inheritance_weights
+    )
+  }
   lapply(inherited_indices, function(index) parent_profile[[index]])
 }
 
+#' Sample one mutable position in proportion to its total event hazard
+#'
+#' Inverse-CDF sampling against the rate set's cached
+#' `cumulative_position_hazards`, retried until the draw lands on a position
+#' that has non-zero hazard and is not excluded.
+#'
+#' @param rate_set A rate set from `physicell_mito_rate_set()`; hazards, not
+#'   per-division probabilities.
+#' @param excluded_positions Integer positions to reject, normally the sites a
+#'   genome has already mutated plus those already selected for this segment.
+#' @return One integer position, or `NA_integer_` when the rate set has no
+#'   hazard at all.
+#' @note The retry loop does not terminate if `excluded_positions` already
+#'   covers every position with non-zero hazard, so callers must bound the
+#'   number of positions they request.
 sample_physicell_mito_position <- function(rate_set, excluded_positions){
   if(rate_set$total_hazard <= 0){
     return(NA_integer_)
@@ -299,6 +444,34 @@ sample_physicell_mito_position <- function(rate_set, excluded_positions){
   }
 }
 
+#' Mutate mt genomes over one segment of constant editing state
+#'
+#' Works entirely in hazard space. For each genome the hazard of the positions
+#' it has already mutated is subtracted from the rate set's `total_hazard`,
+#' because recording sites are irreversible; the number of new events is then
+#' `rpois(1, available_hazard * duration)`, capped at the number of positions
+#' the genome has left. Positions are drawn without replacement in proportion
+#' to their hazard, and each event's type is drawn among the four destination
+#' substitution hazards plus the insertion and deletion hazards at that
+#' position. Every event receives a time drawn uniformly inside the segment.
+#'
+#' @param profile List of sparse mt genomes to mutate.
+#' @param duration Segment length, in the same time units as
+#'   `cell_cycle_length`; a non-positive duration is a no-op, as is a rate set
+#'   with zero total hazard.
+#' @param rate_set Hazards for the editing state that holds over the segment.
+#' @param model Prepared model, read for `mitochondrial_length` and for the
+#'   reference base recorded on each event row.
+#' @param segment_start Absolute start time of the segment; used only as the
+#'   lower bound for the sampled `event_time` values.
+#' @return A list with the updated `profile` and an `events` data frame with
+#'   columns `genome`, `position`, `event` (`substitution`, `insertion`, or
+#'   `deletion`), `reference`, `alternate`, `allele`, `event_time`.
+#' @details Alleles use the repo encoding: `1`-`4` for a substitution to `A`,
+#'   `G`, `C`, `T`, `-1` for a deletion, and the decimal `0.b` for an insertion
+#'   of base code `b`. The `alternate` column carries the human-readable form
+#'   instead: the base letter, `-`, or `+<base>`.
+#' @section Side effects: Consumes the random-number stream.
 mutate_physicell_mito_segment <- function(profile,
                                           duration,
                                           rate_set,
@@ -405,6 +578,25 @@ mutate_physicell_mito_segment <- function(profile,
   list(profile = profile, events = events)
 }
 
+#' Mutate one lineage branch, splitting it at editing induction
+#'
+#' `editing_state` `'induced'` or `'uninduced'` forces a single rate set over
+#' the whole branch. `'auto'` compares the branch against
+#' `model$editing_induction_time` and splits `[start_time, end_time]` into an
+#' uninduced segment followed by an induced one when induction falls strictly
+#' inside the branch; branches wholly before or after induction stay single
+#' segments.
+#'
+#' @param profile List of sparse mt genomes entering the branch.
+#' @param start_time Branch start, normally the node's birth time.
+#' @param end_time Branch end, normally the node's end time.
+#' @param model Prepared model supplying `rate_sets` and
+#'   `editing_induction_time`.
+#' @param editing_state One of `'auto'`, `'induced'`, `'uninduced'`.
+#' @return A list with the branch-final `profile` and an `events` data frame
+#'   holding the columns of `mutate_physicell_mito_segment()` plus
+#'   `segment_start`, `segment_end`, and `editing_state`, the name of the rate
+#'   set that produced each event.
 mutate_physicell_mito_branch <- function(profile,
                                          start_time,
                                          end_time,
@@ -492,6 +684,45 @@ mutate_physicell_mito_branch <- function(profile,
   list(profile = profile, events = events)
 }
 
+#' Replay mitochondrial evolution over a reconstructed lineage
+#'
+#' Walks `nodes` in row order, which must already be topological so that a
+#' parent is processed before its children. A founder row (`parent_node_id` is
+#' `NA`) receives a fresh baseline-heteroplasmy profile; every other row
+#' inherits its parent's genomes through the division bottleneck and is then
+#' mutated over its own `[birth_time, end_time]` interval. Rows whose `origin`
+#' is `induction_continuation` mark a rate-state change rather than a cell
+#' division, so they inherit the parent profile without a bottleneck.
+#'
+#' @param nodes Lineage node table; must be a data frame with at least
+#'   `node_id`, `physicell_id`, `parent_node_id`, `birth_time`, `end_time`,
+#'   `is_terminal`. Optional `cell_type`, `editing_state`, and `origin` columns
+#'   are honored when present.
+#' @param model One prepared model, or a named collection of prepared models
+#'   keyed by cell type; a collection requires a `cell_type` column on `nodes`
+#'   whose every value has a model.
+#' @param params Parsed remote_mito JSON parameter list, forwarded to founder
+#'   initialization.
+#' @param editing_state Fallback state policy (`'auto'`, `'induced'`,
+#'   `'uninduced'`) applied when `nodes` has no `editing_state` column.
+#' @param terminal_physicell_ids Optional PhysiCell IDs restricting the sampled
+#'   terminal set; every ID must appear among the terminal nodes.
+#' @param seed Seed set once before the replay begins.
+#' @param show_progress Whether to emit progress and ETA messages.
+#' @param progress_updates Number of progress checkpoints requested.
+#' @return A named list with `nodes` (as supplied), `profiles` (genome lists
+#'   keyed by `node_id`), `terminal_nodes` (the sampled terminal rows),
+#'   `mutation_events` (every event row plus `node_id`, `physicell_id`,
+#'   `parent_node_id`, `branch_start`, `branch_end`, sorted by event time),
+#'   `editing_state`, and `seed`. Founder heteroplasmy rows appear with
+#'   `editing_state` `'founder_heteroplasmy'` and all their times set to the
+#'   founder's birth time.
+#' @details When `retain_internal_profiles` is off, a parent's profile is
+#'   dropped as soon as its last child has been processed, so `profiles` then
+#'   contains only the nodes still needed downstream. For a model collection
+#'   that flag is read from the first model in the collection.
+#' @section Side effects: Calls `set.seed(seed)` and consumes the
+#'   random-number stream.
 simulate_mito_on_physicell_lineage <- function(nodes,
                                                model,
                                                params,
@@ -505,6 +736,43 @@ simulate_mito_on_physicell_lineage <- function(nodes,
     'end_time', 'is_terminal'
   ) %in% names(nodes))){
     stop('nodes is not a valid PhysiCell lineage node table.')
+  }
+  model_is_collection <- is.null(model$mitochondrial_length)
+  if(model_is_collection){
+    if(length(model) == 0 || is.null(names(model)) ||
+       any(!nzchar(names(model))) ||
+       any(vapply(
+         model,
+         function(value) is.null(value$mitochondrial_length),
+         logical(1)
+       ))){
+      stop('A mitochondrial model collection must contain named prepared models.')
+    }
+    if(!('cell_type' %in% names(nodes))){
+      stop('Lineage nodes need a cell_type column when using model collections.')
+    }
+    missing_models <- setdiff(unique(as.character(nodes$cell_type)), names(model))
+    if(length(missing_models) > 0){
+      stop(sprintf(
+        'No mitochondrial model is available for cell type(s): %s.',
+        paste(missing_models, collapse = ', ')
+      ))
+    }
+    output_model <- model[[1]]
+  } else{
+    output_model <- model
+  }
+  #' Internal: Select the prepared model that applies to one node
+  #'
+  #' @param node One-row slice of the node table.
+  #' @return The single prepared model, or the collection entry named by the
+  #'   node's `cell_type`.
+  node_model <- function(node){
+    if(model_is_collection){
+      model[[as.character(node$cell_type)]]
+    } else{
+      model
+    }
   }
   set.seed(seed)
   profiles <- list()
@@ -522,8 +790,9 @@ simulate_mito_on_physicell_lineage <- function(nodes,
 
   for(node_index in seq_len(nrow(nodes))){
     node <- nodes[node_index, , drop = FALSE]
+    branch_model <- node_model(node)
     if(is.na(node$parent_node_id)){
-      initialized <- initialize_physicell_mito_profile(model, params)
+      initialized <- initialize_physicell_mito_profile(branch_model, params)
       start_profile <- initialized$profile
       if(nrow(initialized$events) > 0){
         initialized$events$segment_start <- node$birth_time
@@ -549,22 +818,38 @@ simulate_mito_on_physicell_lineage <- function(nodes,
       }
       remaining_children[parent_node_id] <-
         remaining_children[parent_node_id] - 1L
-      if(!isTRUE(model$retain_internal_profiles) &&
+      if(!isTRUE(output_model$retain_internal_profiles) &&
          remaining_children[parent_node_id] <= 0){
         profiles[[parent_node_id]] <- NULL
       }
-      start_profile <- inherit_physicell_mito_profile(
-        parent_profile,
-        model$genomes_per_cell
-      )
+      start_profile <- if('origin' %in% names(nodes) &&
+                          identical(
+                            as.character(node$origin),
+                            'induction_continuation'
+                          )){
+        # Induction changes a rate state but is not a cell division, so it must
+        # not introduce an artificial mitochondrial bottleneck.
+        parent_profile
+      } else{
+        inherit_physicell_mito_profile(
+          parent_profile,
+          branch_model$genomes_per_cell,
+          branch_model$variant_selection_coefficient
+        )
+      }
     }
 
+    branch_editing_state <- if('editing_state' %in% names(nodes)){
+      as.character(node$editing_state)
+    } else{
+      editing_state
+    }
     mutation <- mutate_physicell_mito_branch(
       start_profile,
       node$birth_time,
       node$end_time,
-      model,
-      editing_state
+      branch_model,
+      branch_editing_state
     )
     profiles[[node$node_id]] <- mutation$profile
     if(nrow(mutation$events) > 0){
@@ -646,6 +931,19 @@ simulate_mito_on_physicell_lineage <- function(nodes,
   )
 }
 
+#' Summarize terminal-cell heteroplasmy as per-variant fractions
+#'
+#' For each sampled terminal cell, counts how many of its mt genomes carry each
+#' distinct `(position, allele)` pair and divides by the cell's genome count.
+#' Cells whose genomes are all reference contribute no rows.
+#'
+#' @param simulation Result of `simulate_mito_on_physicell_lineage()`; its
+#'   `terminal_nodes` and `profiles` entries are used.
+#' @return A long-form data frame with columns `sample_id`
+#'   (`cell_<physicell_id>`), `physicell_id`, `node_id`, `position`, `allele`,
+#'   `variant_genomes` (carrier count), and `variant_fraction` (carriers over
+#'   genomes per cell); a zero-row frame with the same columns when nothing
+#'   mutated.
 physicell_mito_variant_fractions <- function(simulation){
   terminal_nodes <- simulation$terminal_nodes
   rows <- list()
@@ -702,6 +1000,19 @@ physicell_mito_variant_fractions <- function(simulation){
   do.call(rbind, rows)
 }
 
+#' Reconstruct the nucleotide sequence of one mt genome
+#'
+#' Applies the sparse allele encoding on top of the reference: an integer
+#' allele `1`-`4` replaces the base with `A`, `G`, `C`, `T`; `-1` removes the
+#' base; and a fractional allele `0.b` appends base code `b` immediately after
+#' the reference base at that position.
+#'
+#' @param genome One sparse genome: a named numeric vector whose names are
+#'   positions and whose values are alleles. An empty genome returns the
+#'   reference unchanged.
+#' @param reference Character vector of reference bases, one per position.
+#' @return One collapsed sequence string. Deletions drop bases, so the result
+#'   is not necessarily the same length as `reference`.
 physicell_mito_haplotype_sequence <- function(genome, reference){
   bases <- c('A', 'G', 'C', 'T')
   sequence <- reference
@@ -729,6 +1040,33 @@ physicell_mito_haplotype_sequence <- function(genome, reference){
   paste0(sequence, collapse = '')
 }
 
+#' Write the mitochondrial replay outputs to disk
+#'
+#' Summarizes terminal-cell heteroplasmy, then writes the profiles, the event
+#' table, the variant fractions, the reference sequence, and a run manifest.
+#'
+#' @param simulation Result of `simulate_mito_on_physicell_lineage()`.
+#' @param model Prepared model matching that replay; supplies the reference
+#'   sequence and the manifest's length, genome-count, coefficient, and
+#'   cell-type fields.
+#' @param output_dir Destination directory, created recursively if absent.
+#' @param write_fasta Whether to also emit one randomly sampled haplotype per
+#'   terminal cell.
+#' @param show_progress Whether to emit stage log messages.
+#' @param compress_csv Whether the CSV tables are gzip-compressed, which adds a
+#'   `.gz` suffix to their names.
+#' @return Invisibly, a list with `terminal_profiles` (keyed
+#'   `cell_<physicell_id>`), `variant_fractions`, and `sparse_scores`, which is
+#'   `NULL` when the Matrix package is not installed.
+#' @details The sparse score matrix has rows named `cell_<physicell_id>` and
+#'   columns named `mt_<position>_<allele>`, with variant fractions as entries.
+#' @section Side effects: Creates `output_dir` and writes
+#'   `mitochondrial_profiles.rds`, `mitochondrial_mutation_events.csv`,
+#'   `mitochondrial_variant_fractions.csv`, `mitochondrial_reference.fasta`
+#'   (never compressed), and `mitochondrial_manifest.csv`; adds
+#'   `mitochondrial_variant_fraction_matrix.rds` when Matrix is available and
+#'   `mitochondrial_sampled_haplotypes.fasta` when `write_fasta` is `TRUE`.
+#'   Choosing which haplotype to write consumes the random-number stream.
 write_physicell_mito_outputs <- function(simulation,
                                          model,
                                          output_dir,
@@ -875,6 +1213,7 @@ write_physicell_mito_outputs <- function(simulation,
       'num_sampled_terminal_cells',
       'mitochondrial_length',
       'genomes_per_cell',
+      'variant_selection_coefficient',
       'num_mitochondrial_events',
       'num_variant_observations',
       'cell_type',
@@ -886,6 +1225,7 @@ write_physicell_mito_outputs <- function(simulation,
       nrow(terminal_nodes),
       model$mitochondrial_length,
       model$genomes_per_cell,
+      model$variant_selection_coefficient,
       nrow(simulation$mutation_events),
       nrow(variant_fractions),
       model$cell_type,

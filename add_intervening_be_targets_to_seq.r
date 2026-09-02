@@ -75,6 +75,29 @@ generate_non_be_target_sequence <- function(barcode_length, nuc_fracs, target_fr
 # create helper function that is used to find indices of either nuc or BE targets in a sequence
 # according to their specified configs
 generate_target_indices <- function(config, num_targets, target_pos_1, bc_length_with_targets, num_bases_btwn = NULL){
+  #' @title Compute the barcode positions that will hold base-editor targets
+  #' @description Three layouts are supported, chosen by config (upper-cased
+  #' before matching): 'U' spreads num_targets positions evenly from 1 to
+  #' bc_length_with_targets, 'R' samples them uniformly at random without
+  #' replacement, and 'S' starts at target_pos_1 and steps by num_bases_btwn + 1,
+  #' leaving exactly num_bases_btwn non-target bases between consecutive targets.
+  #' @return Integer vector of 1-based positions into the finished barcode. 'U'
+  #' and 'S' come back in increasing order; 'R' is unsorted.
+  #' @param config character. Layout code: 'U' (uniform), 'R' (random), or 'S'
+  #' (spaced). Any other value is an error.
+  #' @param num_targets integer. Single non-negative integer, no greater than
+  #' bc_length_with_targets. Zero short-circuits to integer(0).
+  #' @param target_pos_1 integer. Position of the first target. Used only by 'S',
+  #' where it must be a positive integer.
+  #' @param bc_length_with_targets integer. Length of the finished barcode, i.e.
+  #' the range the returned positions index into.
+  #' @param num_bases_btwn integer. Number of bases between consecutive targets.
+  #' Used only by 'S', where it must be a non-negative integer.
+  #' @note 'S' errors when the implied last target, target_pos_1 +
+  #' (num_bases_btwn + 1) * (num_targets - 1), would fall past
+  #' bc_length_with_targets. Duplicate rounded positions are dropped under 'U',
+  #' so the result can in principle be shorter than num_targets.
+
   # if config is Uniform, we want uniformly-spaced target indices
 
   config <- toupper(config)
