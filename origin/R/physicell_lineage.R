@@ -989,7 +989,19 @@ physicell_target_positions <- function(target_spec, barcode_length){
     }
     positions <- first + (seq_len(num_targets) - 1L) * (gap + 1L)
     if(max(positions) > barcode_length){
-      stop('Spaced target configuration extends beyond bc_length.')
+      # Report the arithmetic: the caller otherwise has to rederive which of
+      # num_targets, the gap, the first position or bc_length to change.
+      stop(sprintf(
+        paste0(
+          'Spaced target configuration extends beyond bc_length: %d targets ',
+          'starting at %d with a gap of %d place the last target at %d, but ',
+          'bc_length is %d. Either raise bc_length to at least %d, or reduce ',
+          'num_targets to at most %d.'
+        ),
+        num_targets, first, gap, max(positions), barcode_length,
+        max(positions),
+        max(1L, 1L + (barcode_length - first) %/% (gap + 1L))
+      ), call. = FALSE)
     }
   } else{
     stop("Target config must begin with 'U', 'R', or 'S'.")
@@ -1138,12 +1150,47 @@ physicell_barcode_reference <- function(params,
   }
 
   composition <- params$bc_nuc_composition
+  # Without this, the weights below are NULL and the failure surfaces inside
+  # largest_remainder_counts() as "Invalid total or weights", which says nothing
+  # about which parameter is missing. Name it here instead.
+  if(is.null(composition)){
+    stop(
+      'bc_nuc_composition is required when no barcode_sequence file is given. ',
+      'Supply frac_a, frac_g, frac_c and frac_t, for example ',
+      'bc_nuc_composition = list(frac_a = 0.25, frac_g = 0.25, ',
+      'frac_c = 0.25, frac_t = 0.25).',
+      call. = FALSE
+    )
+  }
   weights <- c(
     composition$frac_a,
     composition$frac_g,
     composition$frac_c,
     composition$frac_t
   )
+  missing_fractions <- c('frac_a', 'frac_g', 'frac_c', 'frac_t')[
+    vapply(list(composition$frac_a, composition$frac_g,
+                composition$frac_c, composition$frac_t), is.null, logical(1))
+  ]
+  if(length(missing_fractions)){
+    stop(
+      'bc_nuc_composition is missing: ',
+      paste(missing_fractions, collapse = ', '),
+      '. All four of frac_a, frac_g, frac_c and frac_t are required.',
+      call. = FALSE
+    )
+  }
+  weights <- suppressWarnings(as.numeric(weights))
+  if(any(!is.finite(weights)) || any(weights < 0) || sum(weights) <= 0){
+    stop(
+      'bc_nuc_composition fractions must be finite, non-negative and sum ',
+      'above zero; received ',
+      paste(sprintf('%s=%s', c('frac_a', 'frac_g', 'frac_c', 'frac_t'),
+                    format(weights)), collapse = ', '),
+      '.',
+      call. = FALSE
+    )
+  }
   base_names <- c('A', 'G', 'C', 'T')
   base_counts <- largest_remainder_counts(barcode_length, weights)
   names(base_counts) <- base_names
