@@ -496,6 +496,38 @@ simulate_gillespie_population <- function(params,
 
   edit_spec <- gillespie_induction_spec(params, 'editing_induction')
   diff_spec <- gillespie_induction_spec(params, 'differentiation_induction')
+
+  # An induction specified as a fixed num_cells induces that many cells and no
+  # more. With one founder that covers the whole population, so the same
+  # parameter file behaves completely differently once num_init_cells is
+  # raised: the uninduced founders and all their descendants simply never
+  # record. Nothing fails, the run just carries a diluted signal, so warn
+  # rather than error -- inducing a deliberate subset is legitimate.
+  warn_partial_founder_induction <- function(spec, name){
+    if(is.null(spec$num_cells) || !is.finite(spec$timepoint)){
+      return(invisible(NULL))
+    }
+    requested <- suppressWarnings(as.integer(spec$num_cells))
+    if(is.na(requested) || requested >= num_founders){
+      return(invisible(NULL))
+    }
+    # Only a concern while the population is still just the founders; after
+    # they divide, inducing a subset is an ordinary experimental design.
+    if(spec$timepoint > 0){
+      return(invisible(NULL))
+    }
+    warning(sprintf(
+      paste0(
+        '%s.num_cells is %d but num_init_cells is %d, so %d of the %d ',
+        'founders and all of their descendants will never be induced. Set ',
+        '%s.frac_cells = 1 (and num_cells = NULL) to induce every founder.'
+      ),
+      name, requested, num_founders, num_founders - requested, num_founders,
+      name
+    ), call. = FALSE)
+  }
+  warn_partial_founder_induction(edit_spec, 'editing_induction')
+  warn_partial_founder_induction(diff_spec, 'differentiation_induction')
   stopping_points <- sort(unique(as.numeric(unlist(
     params$sim_length,
     use.names = FALSE

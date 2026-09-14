@@ -440,6 +440,48 @@ lineage_benchmark_empty_target_spec <- function(){
   )
 }
 
+#' Build the PEtracer mark pool used by the benchmark panel
+#'
+#' PEtracer (doi:10.1126/science.adx3800) places three edit sites per cassette
+#' and gives each site its own alphabet of eight predefined 5nt marks, for 24
+#' distinct marks in total. The alphabet is what keeps independent edits at one
+#' site distinguishable: with a single outcome per site, two cells that edit it
+#' separately look identical to two cells sharing an ancestor, and that
+#' homoplasy misleads reconstruction.
+#'
+#' Marks are emitted in per-site blocks of eight, which is the layout
+#' `expand_prime_editing_marks()` expects. Within a site every mark carries the
+#' same efficiency, so the installed mark is uniform over the eight; the
+#' efficiency differs BETWEEN sites, taking the in vitro modification rates the
+#' paper reports for its three edit sites (73.4%, 47.7%, 86.5%).
+#'
+#' @return A list of 24 pegRNA definitions, ordered site-major.
+lineage_benchmark_petracer_pool <- function(){
+  site_efficiency <- c(0.734, 0.477, 0.865)
+  bases <- c('A', 'C', 'G', 'T')
+  pool <- list()
+  for(site in seq_along(site_efficiency)){
+    for(mark in 1:8){
+      index <- (site - 1L) * 8L + mark
+      # Base-4 enumeration of the mark index, so all 24 sequences are distinct
+      # by construction. An ad-hoc arithmetic mix collides: marks that share a
+      # sequence are the same character, which silently shrinks the alphabet.
+      digits <- (index - 1L) %/% 4L^(4:0) %% 4L
+      sequence <- paste(bases[digits + 1L], collapse = '')
+      pool[[index]] <- list(
+        pegRNA_id = sprintf('petracer_site%d_mark%02d', site, mark),
+        edit_sequence = sequence,
+        editing_efficiency = site_efficiency[site],
+        description = sprintf(
+          'PEtracer site %d mark %d (site efficiency %.3f)',
+          site, mark, site_efficiency[site]
+        )
+      )
+    }
+  }
+  pool
+}
+
 #' Return the fixed benchmark pegRNA pool
 #'
 #' @return A list of six pegRNA definitions, each with `pegRNA_id`, a
@@ -614,8 +656,13 @@ lineage_benchmark_recording_params <- function(population_params,
     params$bc_length <- 80L
     params$physicell_adapter$recorder_system <- 'prime editing'
     params$be_targets <- lineage_benchmark_empty_target_spec()
+    # PEtracer geometry: three edit sites per cassette, each with its own
+    # alphabet of eight marks. Targets are NOT bound to a single pegRNA here --
+    # target_pegRNA_ids would pin one outcome per site and reintroduce the
+    # homoplasy the alphabet exists to avoid -- so the pool is blocked instead
+    # and marks_per_target carves it into per-site alphabets.
     params$nuclease_targets <- list(
-      num_targets = 6L,
+      num_targets = 3L,
       edit_rate_class_fractions = list(high = 1, medium = 0, low = 0),
       config = 'S:4:10',
       editing_window = list(
@@ -623,16 +670,12 @@ lineage_benchmark_recording_params <- function(population_params,
       ),
       prime_editing_system = TRUE
     )
-    pegRNA_ids <- vapply(
-      lineage_benchmark_prime_pool(),
-      function(pegRNA) pegRNA$pegRNA_id,
-      character(1)
-    )
     params$prime_editing_backend <- list(
       enabled = TRUE,
-      pegRNAs = lineage_benchmark_prime_pool(),
-      target_pegRNA_ids = as.list(pegRNA_ids),
-      induced_edit_probability_per_cell_cycle = 0.08,
+      pegRNAs = lineage_benchmark_petracer_pool(),
+      assignment = 'cycle',
+      marks_per_target = 8L,
+      induced_edit_probability_per_cell_cycle = 0.18,
       uninduced_edit_probability_per_cell_cycle = 0,
       static_id_length = 12L
     )
@@ -1658,8 +1701,15 @@ write_lineage_benchmark_condition <- function(recording,
       sample_ids,
       integrations
     )
+    # A PEtracer-style run carries which mark each site received, and that
+    # identity IS the character state. Binarising it here would discard the
+    # alphabet before tree building ever sees it, leaving independent edits at
+    # one site indistinguishable from shared ancestry. Every other recorder,
+    # and prime editing with a single mark, still gets the binary scores.
     character_matrix <- lineage_benchmark_subset_matrix(
-      recording$binary_scores,
+      physicell_prime_character_matrix(
+        recording$raw_alleles, recording$binary_scores, recording$model
+      ),
       sample_ids,
       integrations
     )

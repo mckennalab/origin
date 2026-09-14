@@ -1,0 +1,10 @@
+{
+  "ground_truth": "/Users/aaronmck/Desktop/code/PhysiCell/lineage_ground_truth",
+  "params": "/Users/aaronmck/Desktop/code/remote_mito_clean/example_json_params/physicell_neural_organoid_baseline.json",
+  "integrations": 5,
+  "end_time": 10080,
+  "min_leaves": 4,
+  "seed": 1,
+  "organoids": 171,
+  "recorder": "BASELINE base editing, barcode modality only"
+}

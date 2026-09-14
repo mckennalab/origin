@@ -297,9 +297,22 @@ connection <- gzfile(counts_path, open = "wt")
 utils::write.csv(correlation, connection)
 close(connection)
 
+# Also persist the counts and the tree, so downstream analysis (clustering, for
+# instance) works from exactly the cells this figure drew rather than a fresh
+# simulation with a different realization.
+expression_path <- paste0(output_prefix, "_counts.csv.gz")
+connection <- gzfile(expression_path, open = "wt")
+utils::write.csv(as.data.frame(profiles$true_counts), connection)
+close(connection)
+tree_path <- paste0(output_prefix, "_tree.nwk")
+ape::write.tree(profiles$tree, tree_path)
+assignment_path <- paste0(output_prefix, "_assignment.csv")
+utils::write.csv(profiles$assignment, assignment_path, row.names = FALSE)
+
 cat(sprintf(
   "[check] Spearman(cophenetic distance, expression correlation) = %.3f (negative means closer relatives correlate more)\n",
   association
 ))
-cat("\nWrote:\n", paste0("  ", c(png_path, pdf_path, counts_path),
+cat("\nWrote:\n", paste0("  ", c(png_path, pdf_path, counts_path,
+                                   expression_path, tree_path, assignment_path),
                           collapse = "\n"), "\n")

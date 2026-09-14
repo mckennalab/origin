@@ -325,6 +325,72 @@ assign_prime_editing_targets <- function(pool,
   ), drop = FALSE]
 }
 
+#' Expand each recorder target into its alphabet of installable marks
+#'
+#' PEtracer-style recorders place several pegRNAs on the same edit site, each
+#' installing a different predefined mark, so an edit writes one of `N` outcomes
+#' rather than a single fixed one. That distinction matters for reconstruction:
+#' with one outcome per site, two cells that edit the same site independently
+#' are indistinguishable from two cells sharing an ancestor, and the resulting
+#' homoplasy misleads tree building. With `N` marks they differ `(N - 1) / N` of
+#' the time.
+#'
+#' Marks are taken from the pool in blocks, so target one receives the first
+#' `marks_per_target` entries, target two the next block, and so on, cycling
+#' when the pool is exhausted.
+#'
+#' @export
+#' @param pool Validated pegRNA pool.
+#' @param target_positions Recorder coordinates.
+#' @param marks_per_target Marks installable at each site; `1` reproduces the
+#'   single-outcome behaviour exactly.
+#' @return A data frame with one row per target and mark, carrying
+#'   `target_index`, `target_position`, `mark_index`, `allele`, `pegRNA_id`,
+#'   `edit_sequence`, `editing_efficiency`, and `mark_probability`, the
+#'   efficiency-weighted chance that this mark is the one installed when the
+#'   site edits.
+expand_prime_editing_marks <- function(pool, target_positions,
+                                       marks_per_target = 1L){
+  marks_per_target <- suppressWarnings(as.integer(marks_per_target))
+  if(length(marks_per_target) != 1L || is.na(marks_per_target) ||
+     marks_per_target < 1L){
+    stop('prime_editing_backend.marks_per_target must be a positive integer.')
+  }
+  target_positions <- as.integer(target_positions)
+  if(marks_per_target > nrow(pool)){
+    # Cycling would hand the same pegRNA to one site twice, which silently
+    # halves that site's real alphabet rather than failing.
+    stop(sprintf(paste(
+      'prime_editing_backend.marks_per_target is %d but the pegRNA pool has',
+      'only %d entr%s; a site cannot install the same mark twice.'
+    ), marks_per_target, nrow(pool), if(nrow(pool) == 1L) 'y' else 'ies'))
+  }
+  blocks <- lapply(seq_along(target_positions), function(index){
+    offset <- (index - 1L) * marks_per_target
+    rows <- ((offset + seq_len(marks_per_target) - 1L) %% nrow(pool)) + 1L
+    block <- pool[rows, , drop = FALSE]
+    efficiency <- as.numeric(block$editing_efficiency)
+    # Efficiency decides which mark wins once the site fires; it does not also
+    # decide whether it fires, which the site's own rate governs. An all-zero
+    # block would otherwise divide by zero, so it falls back to uniform.
+    weights <- if(sum(efficiency) > 0) efficiency / sum(efficiency) else
+      rep(1 / length(efficiency), length(efficiency))
+    data.frame(
+      target_index = index,
+      target_position = target_positions[index],
+      mark_index = seq_len(marks_per_target),
+      # Allele 0 is "unedited", so marks start at 1.
+      allele = seq_len(marks_per_target),
+      pegRNA_id = as.character(block$pegRNA_id),
+      edit_sequence = as.character(block$edit_sequence),
+      editing_efficiency = efficiency,
+      mark_probability = weights,
+      stringsAsFactors = FALSE
+    )
+  })
+  do.call(rbind, blocks)
+}
+
 #' Prepare the shared prime-editing backend
 #'
 #' Loads the pegRNA pool, assigns one pegRNA per recorder target, and records
@@ -368,9 +434,44 @@ prepare_prime_editing_backend <- function(params,
     target_positions,
     configuration
   )
+  marks_per_target <- if(is.null(configuration$marks_per_target)) 1L else
+    configuration$marks_per_target
+  marks <- expand_prime_editing_marks(
+    pool, targets$target_position, marks_per_target
+  )
+  marks_per_target <- max(marks$mark_index)
+  if(marks_per_target > 1L){
+    # assign_prime_editing_targets() walks the pool one entry per site, which
+    # for a blocked mark pool hands every site the FIRST block's pegRNA and so
+    # the wrong efficiency. A site's rate has to come from its own alphabet:
+    # the mean over the marks it can actually install.
+    block_means <- vapply(
+      split(marks$editing_efficiency, marks$target_position),
+      mean, numeric(1)
+    )
+    block_first <- marks[!duplicated(marks$target_position), , drop = FALSE]
+    order_by_target <- match(targets$target_position, block_first$target_position)
+    targets$editing_efficiency <- unname(
+      block_means[as.character(targets$target_position)]
+    )
+    targets$pegRNA_id <- block_first$pegRNA_id[order_by_target]
+    targets$edit_sequence <- block_first$edit_sequence[order_by_target]
+  }
+  # With one mark the recorder is binary, as before. With several, an edited
+  # site carries which mark it received, so the encoding has to name them.
+  state_encoding <- if(marks_per_target == 1L){
+    c(unedited = 0L, edited = 1L)
+  } else{
+    setNames(
+      c(0L, seq_len(marks_per_target)),
+      c('unedited', sprintf('mark_%d', seq_len(marks_per_target)))
+    )
+  }
   list(
     pool = pool,
     targets = targets,
+    marks = marks,
+    marks_per_target = marks_per_target,
     pool_source = attr(pool, 'source'),
     assignment = if(is.null(configuration$target_pegRNA_ids)){
       if(is.null(configuration$assignment)) 'cycle' else
@@ -378,7 +479,7 @@ prepare_prime_editing_backend <- function(params,
     } else{
       'explicit'
     },
-    state_encoding = c(unedited = 0L, edited = 1L)
+    state_encoding = state_encoding
   )
 }
 

@@ -4,7 +4,7 @@
 \alias{draw_physicell_target_rates}
 \title{Draw class-stratified per-target mutation probabilities}
 \usage{
-draw_physicell_target_rates(target_classes, mean_probability)
+draw_physicell_target_rates(target_classes, mean_probability, shape = 0.5)
 }
 \arguments{
 \item{target_classes}{Named `High`/`Medium`/`Low` classes; an empty vector
@@ -12,13 +12,18 @@ returns an empty result.}
 
 \item{mean_probability}{Mean per-division probability; must be one finite
 non-negative value, and zero returns all-zero rates.}
+
+\item{shape}{Gamma shape controlling dispersion across targets, with
+coefficient of variation `1 / sqrt(shape)`. Must be one finite positive
+value. Set per target block with `edit_rate_dispersion_shape`; see
+[physicell_target_dispersion()].}
 }
 \value{
 A named numeric vector of probabilities capped just below one.
 }
 \description{
-Samples 1000 gamma variates with shape 0.5 and the requested mean, cuts them
-at the quantiles implied by the Low/Medium/High class proportions, and draws
+Samples 1000 gamma variates with the requested shape and mean, cuts them at
+the quantiles implied by the Low/Medium/High class proportions, and draws
 each target's rate from its own class bin, so higher classes receive the
 heavier tail. Falls back to the mean for every target when those quantiles
 are not distinct.

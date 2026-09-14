@@ -1,0 +1,13 @@
+cells: 64
+genes: 400
+variable features: 200
+principal components used: 15 of 50 computed
+resolution: 0.50
+clusters: 2
+cluster sizes: 48, 16
+adjusted Rand index vs lineage: 1.000
+contingency (rows lineage, columns cluster):
+       cluster
+lineage  0  1
+      1 48  0
+      2  0 16

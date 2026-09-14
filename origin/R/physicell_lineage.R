@@ -1364,10 +1364,40 @@ physicell_substitution_matrix <- function(model_name, model_parameters, sequence
   result
 }
 
+#' Resolve the editing-rate dispersion shape for a target block
+#'
+#' The shape governs how unequal per-target editing rates are: the gamma
+#' distribution `draw_physicell_target_rates()` samples has coefficient of
+#' variation `1 / sqrt(shape)`, so smaller values spread rates further apart and
+#' push mass towards both a dead tail and a fast, early-saturating tail. The
+#' default of 0.5 (CV 1.41) is retained so existing parameter files are
+#' unaffected; real constructs may be considerably more dispersed. A 34-barcode
+#' BASELINE recording was reproduced at roughly 0.09 (CV 3.4), where 0.5 yielded
+#' no saturated targets at all against 17% observed.
+#'
+#' @export
+#' @param target_spec One JSON target block, or `NULL` for the default.
+#' @param default Shape to use when the block does not set one.
+#' @return One positive finite number.
+physicell_target_dispersion <- function(target_spec, default = 0.5){
+  if(is.null(target_spec) || is.null(target_spec$edit_rate_dispersion_shape)){
+    return(default)
+  }
+  shape <- unlist(target_spec$edit_rate_dispersion_shape, use.names = FALSE)
+  # Deliberately not coerced from character: a quoted number in a parameter file
+  # is a mistake in the file, and silently accepting it hides the typo until the
+  # rates it produces are questioned.
+  if(!is.numeric(shape) || length(shape) != 1 || !is.finite(shape) ||
+     shape <= 0){
+    stop('Target edit_rate_dispersion_shape must be one finite positive number.')
+  }
+  as.numeric(shape)
+}
+
 #' Draw class-stratified per-target mutation probabilities
 #'
-#' Samples 1000 gamma variates with shape 0.5 and the requested mean, cuts them
-#' at the quantiles implied by the Low/Medium/High class proportions, and draws
+#' Samples 1000 gamma variates with the requested shape and mean, cuts them at
+#' the quantiles implied by the Low/Medium/High class proportions, and draws
 #' each target's rate from its own class bin, so higher classes receive the
 #' heavier tail. Falls back to the mean for every target when those quantiles
 #' are not distinct.
@@ -1377,8 +1407,13 @@ physicell_substitution_matrix <- function(model_name, model_parameters, sequence
 #'   returns an empty result.
 #' @param mean_probability Mean per-division probability; must be one finite
 #'   non-negative value, and zero returns all-zero rates.
+#' @param shape Gamma shape controlling dispersion across targets, with
+#'   coefficient of variation `1 / sqrt(shape)`. Must be one finite positive
+#'   value. Set per target block with `edit_rate_dispersion_shape`; see
+#'   [physicell_target_dispersion()].
 #' @return A named numeric vector of probabilities capped just below one.
-draw_physicell_target_rates <- function(target_classes, mean_probability){
+draw_physicell_target_rates <- function(target_classes, mean_probability,
+                                        shape = 0.5){
   if(length(target_classes) == 0){
     return(setNames(numeric(), character()))
   }
@@ -1387,14 +1422,18 @@ draw_physicell_target_rates <- function(target_classes, mean_probability){
      mean_probability < 0){
     stop('Target mutation probability must be one finite non-negative value.')
   }
+  shape <- as.numeric(shape)
+  if(length(shape) != 1 || !is.finite(shape) || shape <= 0){
+    stop('Target rate dispersion shape must be one finite positive value.')
+  }
   if(mean_probability == 0){
     return(setNames(rep(0, length(target_classes)), names(target_classes)))
   }
 
   bootstrap <- stats::rgamma(
     1000,
-    shape = 0.5,
-    scale = mean_probability / 0.5
+    shape = shape,
+    scale = mean_probability / shape
   )
   class_counts <- table(factor(
     target_classes,
@@ -1513,7 +1552,8 @@ physicell_rate_set <- function(params,
 
   be_rates <- draw_physicell_target_rates(
     be_classes,
-    state_params$be_mutations_per_target_per_division
+    state_params$be_mutations_per_target_per_division,
+    shape = physicell_target_dispersion(params$be_targets)
   )
   be_destination <- match(be_to, bases)
   for(position_name in names(be_rates)){
@@ -1524,13 +1564,16 @@ physicell_rate_set <- function(params,
     )
   }
 
+  nuclease_shape <- physicell_target_dispersion(params$nuclease_targets)
   insertion_rates <- draw_physicell_target_rates(
     nuc_classes,
-    state_params$nuc_insertions_per_target_per_division
+    state_params$nuc_insertions_per_target_per_division,
+    shape = nuclease_shape
   )
   deletion_rates <- draw_physicell_target_rates(
     nuc_classes,
-    state_params$nuc_deletions_per_target_per_division
+    state_params$nuc_deletions_per_target_per_division,
+    shape = nuclease_shape
   )
   for(position_name in union(names(insertion_rates), names(deletion_rates))){
     position <- as.integer(position_name)
@@ -2995,6 +3038,15 @@ mutate_prime_editing_segment <- function(profile,
     target_rows,
     active_position_names
   )
+  # Which marks each site can install, and with what relative chance. Absent
+  # (single-outcome pools) every edit writes allele 1, as it always has.
+  marks <- model$prime_editing$marks
+  marks_by_position <- if(is.null(marks) ||
+                          isTRUE(model$prime_editing$marks_per_target == 1L)){
+    NULL
+  } else{
+    split(marks[, c('allele', 'mark_probability')], marks$target_position)
+  }
   event_chunks <- vector('list', model$num_integrations)
   event_chunk_count <- 0L
 
@@ -3023,12 +3075,25 @@ mutate_prime_editing_segment <- function(profile,
     mutated_hazards <- hazards[mutated]
     event_times <- segment_start -
       log1p(-mutation_draws[mutated]) / mutated_hazards
+    # One of the site's marks is installed, drawn independently per cell, so two
+    # cells editing the same site usually end up distinguishable.
+    mark_alleles <- if(is.null(marks_by_position)){
+      rep.int(1, length(mutated_positions))
+    } else{
+      vapply(as.character(mutated_positions), function(position){
+        choices <- marks_by_position[[position]]
+        if(is.null(choices) || nrow(choices) == 0L) return(1)
+        as.numeric(choices$allele[
+          sample.int(nrow(choices), 1L, prob = choices$mark_probability)
+        ])
+      }, numeric(1), USE.NAMES = FALSE)
+    }
     if(inherits(profile, 'physicell_sparse_barcode')){
-      new_values <- rep.int(1, length(mutated_positions))
+      new_values <- mark_alleles
       names(new_values) <- as.character(mutated_positions)
       profile[[integration]][names(new_values)] <- new_values
     } else{
-      profile[integration, mutated_positions] <- 1
+      profile[integration, mutated_positions] <- mark_alleles
     }
     assignment_rows <- unname(
       target_by_position[as.character(mutated_positions)]
@@ -3038,14 +3103,26 @@ mutate_prime_editing_segment <- function(profile,
       ,
       drop = FALSE
     ]
+    # The recorded sequence has to be the mark that was actually installed, not
+    # the site's first pegRNA, or the event log and the profile disagree.
+    alternate <- if(is.null(marks_by_position)){
+      assignments$edit_sequence
+    } else{
+      mark_key <- paste(mutated_positions, mark_alleles, sep = '_')
+      lookup <- setNames(
+        marks$edit_sequence,
+        paste(marks$target_position, marks$allele, sep = '_')
+      )
+      unname(lookup[mark_key])
+    }
     event_chunk_count <- event_chunk_count + 1L
     event_chunks[[event_chunk_count]] <- data.frame(
       integration = rep.int(integration, length(mutated_positions)),
       position = mutated_positions,
       event = rep.int('prime_edit', length(mutated_positions)),
       reference = rep.int('unedited', length(mutated_positions)),
-      alternate = assignments$edit_sequence,
-      allele = rep.int(1, length(mutated_positions)),
+      alternate = alternate,
+      allele = mark_alleles,
       event_time = event_times,
       stringsAsFactors = FALSE
     )
@@ -4493,6 +4570,30 @@ physicell_sparse_recording_matrix <- function(terminal_profiles,
   )
 }
 
+#' Choose the character matrix a prime-editing run should expose
+#'
+#' With a single installable mark per site the recorder is binary and the score
+#' matrix is the character matrix, as it has always been. With a mark alphabet
+#' (PEtracer-style, `marks_per_target > 1`) the identity of the installed mark
+#' IS the character state: collapsing it to presence/absence would discard the
+#' very information the alphabet exists to provide, leaving two cells that
+#' edited a site independently indistinguishable from two cells sharing an
+#' ancestor.
+#'
+#' @export
+#' @param raw_alleles Allele-state matrix carrying which mark was installed.
+#' @param binary_scores Presence/absence matrix.
+#' @param model Prepared recording model.
+#' @return `raw_alleles` when the run uses a mark alphabet, otherwise
+#'   `binary_scores`.
+physicell_prime_character_matrix <- function(raw_alleles, binary_scores, model){
+  marks <- model$prime_editing$marks_per_target
+  if(is.null(marks) || !is.finite(marks) || marks <= 1L){
+    return(binary_scores)
+  }
+  raw_alleles
+}
+
 #' One-hot encode PALINCODE states as phylogenetic characters
 #'
 #' Expands every cBit into three columns (`left`, `right`, `both`); a wild-type
@@ -4859,7 +4960,7 @@ write_physicell_recording_outputs <- function(simulation,
         file.path(output_dir, 'prime_editing_state_matrix_sparse.rds')
       )
       saveRDS(
-        binary_scores,
+        physicell_prime_character_matrix(raw_alleles, binary_scores, model),
         file.path(output_dir, 'prime_editing_character_matrix_sparse.rds')
       )
     }
@@ -4920,7 +5021,7 @@ write_physicell_recording_outputs <- function(simulation,
         compress = compress_csv
       )
       write_physicell_csv(
-        binary_scores,
+        physicell_prime_character_matrix(raw_alleles, binary_scores, model),
         file.path(output_dir, 'prime_editing_character_matrix.csv'),
         row.names = TRUE,
         compress = compress_csv
