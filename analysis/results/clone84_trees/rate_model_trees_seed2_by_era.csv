@@ -1,0 +1,17 @@
+"model","era","clades","recall"
+"empirical_rates","earliest",610,0.613114754098361
+"fitted_shape","earliest",610,0.444262295081967
+"perfect","earliest",610,1
+"random","earliest",610,0
+"empirical_rates","early",600,0.705
+"fitted_shape","early",600,0.575
+"perfect","early",600,1
+"random","early",600,0
+"empirical_rates","late",600,0.8
+"fitted_shape","late",600,0.703333333333333
+"perfect","late",600,1
+"random","late",600,0.00166666666666667
+"empirical_rates","latest",603,0.946932006633499
+"fitted_shape","latest",603,0.892205638474295
+"perfect","latest",603,1
+"random","latest",603,0.0033167495854063

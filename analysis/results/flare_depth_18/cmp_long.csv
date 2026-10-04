@@ -1,0 +1,212 @@
+"feature","level","dataset","value"
+"per-target editing rate",1,"real",0.878464
+"per-target editing rate",2,"real",0.881424
+"per-target editing rate",3,"real",0.883084
+"per-target editing rate",4,"real",0.880533
+"per-target editing rate",5,"real",0.882601
+"per-target editing rate",6,"real",0.877847
+"per-target editing rate",7,"real",0.882587
+"per-target editing rate",8,"real",0.863892
+"per-target editing rate",1,"simulated",0.944773790951638
+"per-target editing rate",2,"simulated",1
+"per-target editing rate",3,"simulated",0.968330733229329
+"per-target editing rate",4,"simulated",0.897451898075923
+"per-target editing rate",5,"simulated",0.82386895475819
+"per-target editing rate",6,"simulated",0.93619344773791
+"per-target editing rate",7,"simulated",0.831461258450338
+"per-target editing rate",8,"simulated",0.656994279771191
+"distinct calls per molecule",1,"real",0.3133474097948
+"distinct calls per molecule",2,"real",0.465184460605759
+"distinct calls per molecule",3,"real",0.132790940696351
+"distinct calls per molecule",4,"real",0.0727849498301995
+"distinct calls per molecule",5,"real",0.00991722412535428
+"distinct calls per molecule",6,"real",0.00334112264446669
+"distinct calls per molecule",7,"real",0.00239990187067907
+"distinct calls per molecule",8,"real",0.000233990432391209
+"distinct calls per molecule",1,"real_collapsed",0.686640709682454
+"distinct calls per molecule",2,"real_collapsed",0.308318392593469
+"distinct calls per molecule",3,"real_collapsed",0.0050408977240774
+"distinct calls per molecule",4,"real_collapsed",0
+"distinct calls per molecule",5,"real_collapsed",0
+"distinct calls per molecule",6,"real_collapsed",0
+"distinct calls per molecule",7,"real_collapsed",0
+"distinct calls per molecule",8,"real_collapsed",0
+"distinct calls per molecule",1,"simulated",0.476911076443058
+"distinct calls per molecule",2,"simulated",0.447737909516381
+"distinct calls per molecule",3,"simulated",0.0675507020280811
+"distinct calls per molecule",4,"simulated",0.0078003120124805
+"distinct calls per molecule",5,"simulated",0
+"distinct calls per molecule",6,"simulated",0
+"distinct calls per molecule",7,"simulated",0
+"distinct calls per molecule",8,"simulated",0
+"largest shared span",0,"real",0.114484874396247
+"largest shared span",1,"real",0.00219650278003448
+"largest shared span",2,"real",0.00824588505714433
+"largest shared span",3,"real",0.00580079984877655
+"largest shared span",4,"real",0.062784766134007
+"largest shared span",5,"real",0.156457750764561
+"largest shared span",6,"real",0.0788769970294548
+"largest shared span",7,"real",0.372289888591222
+"largest shared span",8,"real",0.198862535398553
+"largest shared span",0,"real_collapsed",0.114514956466959
+"largest shared span",1,"real_collapsed",0.00137936429248295
+"largest shared span",2,"real_collapsed",0.000417131913363391
+"largest shared span",3,"real_collapsed",0.000890463665759811
+"largest shared span",4,"real_collapsed",0.000714079711497367
+"largest shared span",5,"real_collapsed",0.00125424370490604
+"largest shared span",6,"real_collapsed",0.0271166121977574
+"largest shared span",7,"real_collapsed",0.281587394831779
+"largest shared span",8,"real_collapsed",0.572125753215495
+"largest shared span",0,"simulated",0
+"largest shared span",1,"simulated",0
+"largest shared span",2,"simulated",0.00124804992199688
+"largest shared span",3,"simulated",0.021996879875195
+"largest shared span",4,"simulated",0.043213728549142
+"largest shared span",5,"simulated",0.0906916276651066
+"largest shared span",6,"simulated",0.128549141965679
+"largest shared span",7,"simulated",0.237389495579823
+"largest shared span",8,"simulated",0.476911076443058
+"distinct alleles per target",1,"real",1572
+"distinct alleles per target",2,"real",2907
+"distinct alleles per target",3,"real",3053
+"distinct alleles per target",4,"real",3206
+"distinct alleles per target",5,"real",3350
+"distinct alleles per target",6,"real",3726
+"distinct alleles per target",7,"real",2841
+"distinct alleles per target",8,"real",2671
+"distinct alleles per target",1,"simulated",6
+"distinct alleles per target",2,"simulated",2
+"distinct alleles per target",3,"simulated",6
+"distinct alleles per target",4,"simulated",6
+"distinct alleles per target",5,"simulated",3
+"distinct alleles per target",6,"simulated",6
+"distinct alleles per target",7,"simulated",6
+"distinct alleles per target",8,"simulated",6
+"normalised entropy per target",1,"real",0.382015
+"normalised entropy per target",2,"real",0.364837
+"normalised entropy per target",3,"real",0.362412
+"normalised entropy per target",4,"real",0.361504
+"normalised entropy per target",5,"real",0.360661
+"normalised entropy per target",6,"real",0.360451
+"normalised entropy per target",7,"real",0.370045
+"normalised entropy per target",8,"real",0.371315
+"normalised entropy per target",1,"simulated",0.129482499800107
+"normalised entropy per target",2,"simulated",0.0247279461219458
+"normalised entropy per target",3,"simulated",0.188744303911113
+"normalised entropy per target",4,"simulated",0.216413301833874
+"normalised entropy per target",5,"simulated",0.438864334058205
+"normalised entropy per target",6,"simulated",0.205121786810519
+"normalised entropy per target",7,"simulated",0.27809034003968
+"normalised entropy per target",8,"simulated",0.46331081712084
+"pairwise phi",1,"real",0.972031068527894
+"pairwise phi",2,"real",0.969079347006008
+"pairwise phi",3,"real",0.954535281682419
+"pairwise phi",4,"real",0.965528184753151
+"pairwise phi",5,"real",0.941684546164785
+"pairwise phi",6,"real",0.962675580828714
+"pairwise phi",7,"real",0.885587361445909
+"pairwise phi",1,"real",0.986203790381968
+"pairwise phi",2,"real",0.971477934572293
+"pairwise phi",3,"real",0.982562201794704
+"pairwise phi",4,"real",0.958343828430356
+"pairwise phi",5,"real",0.97961080077681
+"pairwise phi",6,"real",0.901734495742907
+"pairwise phi",1,"real",0.9780997095257
+"pairwise phi",2,"real",0.989192981712595
+"pairwise phi",3,"real",0.965040091464173
+"pairwise phi",4,"real",0.986175713286437
+"pairwise phi",5,"real",0.903631220303431
+"pairwise phi",1,"real",0.98304857081378
+"pairwise phi",2,"real",0.958674519859771
+"pairwise phi",3,"real",0.980019126593912
+"pairwise phi",4,"real",0.897533089217807
+"pairwise phi",1,"real",0.972576130260877
+"pairwise phi",2,"real",0.993830015039792
+"pairwise phi",3,"real",0.910800959658531
+"pairwise phi",1,"real",0.973581204408748
+"pairwise phi",2,"real",0.891541675507674
+"pairwise phi",1,"real",0.914724513083778
+"pairwise phi",1,"simulated",NA
+"pairwise phi",2,"simulated",0.178581508499997
+"pairwise phi",3,"simulated",0.0248349296818996
+"pairwise phi",4,"simulated",-0.0460485960571382
+"pairwise phi",5,"simulated",-0.0267914524155419
+"pairwise phi",6,"simulated",-0.0297923169790982
+"pairwise phi",7,"simulated",0.00226737469228923
+"pairwise phi",1,"simulated",NA
+"pairwise phi",2,"simulated",NA
+"pairwise phi",3,"simulated",NA
+"pairwise phi",4,"simulated",NA
+"pairwise phi",5,"simulated",NA
+"pairwise phi",6,"simulated",NA
+"pairwise phi",1,"simulated",0.180646802082002
+"pairwise phi",2,"simulated",0.116726541202353
+"pairwise phi",3,"simulated",-0.002257691567482
+"pairwise phi",4,"simulated",-0.0203394206095839
+"pairwise phi",5,"simulated",0.0388522814100809
+"pairwise phi",1,"simulated",0.323395184504048
+"pairwise phi",2,"simulated",0.0800757673274998
+"pairwise phi",3,"simulated",0.0818018326877665
+"pairwise phi",4,"simulated",0.0847099386183518
+"pairwise phi",1,"simulated",0.31663207674574
+"pairwise phi",2,"simulated",0.363271723331048
+"pairwise phi",3,"simulated",0.295689941554412
+"pairwise phi",1,"simulated",0.275208497351011
+"pairwise phi",2,"simulated",0.286012038322638
+"pairwise phi",1,"simulated",0.511317224724097
+"P(same allele | both edited)",1,"real",0.507148870203923
+"P(same allele | both edited)",2,"real",0.469638211812405
+"P(same allele | both edited)",3,"real",0.399923852127131
+"P(same allele | both edited)",4,"real",0.378412659690363
+"P(same allele | both edited)",5,"real",0.315699688276834
+"P(same allele | both edited)",6,"real",0.302257951858448
+"P(same allele | both edited)",7,"real",0.231741498839374
+"P(same allele | both edited)",1,"real",0.858944092844657
+"P(same allele | both edited)",2,"real",0.785017614495062
+"P(same allele | both edited)",3,"real",0.756892331602084
+"P(same allele | both edited)",4,"real",0.684107689173693
+"P(same allele | both edited)",5,"real",0.660938942948373
+"P(same allele | both edited)",6,"real",0.58631429175551
+"P(same allele | both edited)",1,"real",0.856405133812302
+"P(same allele | both edited)",2,"real",0.825065391059369
+"P(same allele | both edited)",3,"real",0.750106258797346
+"P(same allele | both edited)",4,"real",0.726614668215533
+"P(same allele | both edited)",5,"real",0.653059375350515
+"P(same allele | both edited)",1,"real",0.95172214985027
+"P(same allele | both edited)",2,"real",0.87687758553404
+"P(same allele | both edited)",3,"real",0.851797341197691
+"P(same allele | both edited)",4,"real",0.761792175308189
+"P(same allele | both edited)",1,"real",0.919722809386325
+"P(same allele | both edited)",2,"real",0.888936797706334
+"P(same allele | both edited)",3,"real",0.782752037885697
+"P(same allele | both edited)",1,"real",0.948437029619285
+"P(same allele | both edited)",2,"real",0.837180642586741
+"P(same allele | both edited)",1,"real",0.844726399136367
+"P(same allele | both edited)",1,"simulated",0.996972699251431
+"P(same allele | both edited)",2,"simulated",0.96644106034969
+"P(same allele | both edited)",3,"simulated",0.98941118863998
+"P(same allele | both edited)",4,"simulated",0.996709421798402
+"P(same allele | both edited)",5,"simulated",0.972968197879859
+"P(same allele | both edited)",6,"simulated",0.989971441854287
+"P(same allele | both edited)",7,"simulated",0.943555816095804
+"P(same allele | both edited)",1,"simulated",0.964019118199882
+"P(same allele | both edited)",2,"simulated",0.987368177077298
+"P(same allele | both edited)",3,"simulated",0.994066780281512
+"P(same allele | both edited)",4,"simulated",0.974504249291785
+"P(same allele | both edited)",5,"simulated",0.98924260429045
+"P(same allele | both edited)",6,"simulated",0.940478075035618
+"P(same allele | both edited)",1,"simulated",0.969637784090909
+"P(same allele | both edited)",2,"simulated",0.96856239106578
+"P(same allele | both edited)",3,"simulated",0.941885147151626
+"P(same allele | both edited)",4,"simulated",0.954454292553536
+"P(same allele | both edited)",5,"simulated",0.913061158100195
+"P(same allele | both edited)",1,"simulated",0.988418022360581
+"P(same allele | both edited)",2,"simulated",0.970806957163051
+"P(same allele | both edited)",3,"simulated",0.981828193832599
+"P(same allele | both edited)",4,"simulated",0.93476194590858
+"P(same allele | both edited)",1,"simulated",0.98610299370089
+"P(same allele | both edited)",2,"simulated",0.990260427694262
+"P(same allele | both edited)",3,"simulated",0.956194806330331
+"P(same allele | both edited)",1,"simulated",0.985827994564162
+"P(same allele | both edited)",2,"simulated",0.948259265201348
+"P(same allele | both edited)",1,"simulated",0.97518772445315

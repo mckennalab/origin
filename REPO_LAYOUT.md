@@ -37,8 +37,8 @@ roxygen2::roxygenise("origin", roclets = c("namespace", "rd"))
 ## analysis/ - benchmarking and analysis
 
 `lineage_benchmark.R`, `physicell_visium.R`, `physicell_scdesign3.R`,
-`scdesign3_helpers.R`, and `engine_comparison.R`, plus their drivers in
-`analysis/cli/`. These are sourced rather than installed, deliberately: they
+`scdesign3_helpers.R`, `symsim_profiles.R`, and `engine_comparison.R`, plus
+their drivers in `analysis/cli/`. These are sourced rather than installed, deliberately: they
 carry the heavy dependencies (Seurat, scDesign3, zellkonverter,
 SingleCellExperiment, ggplot2) and they are still moving quickly. Keeping them
 out of the package keeps those dependencies optional.
@@ -83,5 +83,7 @@ source("load_origin.R")
 
 - `R CMD check origin` - Status: OK, no notes or warnings
 - `Rscript tests/regression_tests.R` - all regression tests pass
-- all 8 command-line drivers respond to `--help`
+- all command-line drivers respond to `--help`
+- `Rscript tests/symsim_tests.R` - SymSim integration tests (skips cleanly when
+  SymSim is not installed)
 - the clique harness loads and all 9 of its override targets remain patchable

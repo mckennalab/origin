@@ -1,0 +1,124 @@
+"panel","series","x","y"
+"A","measured",0.5,0.0509583965606302
+"A","measured",1.5,0.00123503579994176
+"A","measured",2.5,0.0387536381608502
+"A","measured",4,0.0827292901031782
+"A","measured",7.5,0.0466412586829309
+"A","measured",15,0.0869059499751969
+"A","measured",23,0.028072371049239
+"A","measured",33,0.0137512968607556
+"A","measured",50,0.08318584362164
+"A","measured",70,0.0343422995371542
+"A","measured",90,0.0154911754936119
+"A","measured",110,0.100453297648018
+"A","measured",130,0.049999926834372
+"A","measured",150,0.238976500663612
+"A","measured",170,0.000907070872617178
+"A","measured",190,0.127596648136252
+"A","fitted mixture",0.5,0
+"A","fitted mixture",1.5,0
+"A","fitted mixture",2.5,0.0436581245164448
+"A","fitted mixture",4,0.0702319485892031
+"A","fitted mixture",7.5,0.118574308285833
+"A","fitted mixture",15,0.0926689087837304
+"A","fitted mixture",23,0.016468507728988
+"A","fitted mixture",33,0.0121053268701414
+"A","fitted mixture",50,0.0195158921889063
+"A","fitted mixture",70,0.0596213664282444
+"A","fitted mixture",90,0.104521602745278
+"A","fitted mixture",110,0.128790151527113
+"A","fitted mixture",130,0.122674329864894
+"A","fitted mixture",150,0.0984215706398455
+"A","fitted mixture",170,0.0689266785614661
+"A","fitted mixture",190,0.043821283269912
+"B","marginal target",1,0.832702418506835
+"B","marginal target",1.42,0.879179810725552
+"B","marginal target",2,0.911277602523659
+"B","conditional target",3,0.955415352260778
+"B","conditional target",6,0.969453207150368
+"B","conditional target",11,0.98286014721346
+"B","real, marginal",0.05,0.8788
+"B","real, marginal",20,0.8788
+"B","real, excl. suppressed",0.05,0.9924
+"B","real, excl. suppressed",20,0.9924
+"C","real",0,0.1144
+"C","real",1,0.0014
+"C","real",2,3e-04
+"C","real",3,9e-04
+"C","real",4,3e-04
+"C","real",5,9e-04
+"C","real",6,7e-04
+"C","real",7,0.0325
+"C","real",8,0.8485
+"C","real, excl. suppressed",0,0
+"C","real, excl. suppressed",1,0.00158102766798419
+"C","real, excl. suppressed",2,0.000338791643139469
+"C","real, excl. suppressed",3,0.00101637492941841
+"C","real, excl. suppressed",4,0.000338791643139469
+"C","real, excl. suppressed",5,0.00101637492941841
+"C","real, excl. suppressed",6,0.000790513833992095
+"C","real, excl. suppressed",7,0.0367024280067758
+"C","real, excl. suppressed",8,0.958215697346132
+"C","simulated, marginal target",0,0
+"C","simulated, marginal target",1,0
+"C","simulated, marginal target",2,0.000416016640665627
+"C","simulated, marginal target",3,0.0104524180967239
+"C","simulated, marginal target",4,0.0403536141445658
+"C","simulated, marginal target",5,0.0784711388455538
+"C","simulated, marginal target",6,0.125533021320853
+"C","simulated, marginal target",7,0.238273530941238
+"C","simulated, marginal target",8,0.5065002600104
+"C","simulated, conditional target",0,0
+"C","simulated, conditional target",1,0
+"C","simulated, conditional target",2,0
+"C","simulated, conditional target",3,0
+"C","simulated, conditional target",4,0
+"C","simulated, conditional target",5,0
+"C","simulated, conditional target",6,0.00545270952541232
+"C","simulated, conditional target",7,0.118276674520364
+"C","simulated, conditional target",8,0.876270615954224
+"D","real, excl. suppressed",1,0.00155774996151189
+"D","real, excl. suppressed",2,0.000471077311141311
+"D","real, excl. suppressed",3,0.00100562248031532
+"D","real, excl. suppressed",4,0.000806427750205949
+"D","real, excl. suppressed",5,0.00141644821001343
+"D","real, excl. suppressed",6,0.030623455919214
+"D","real, excl. suppressed",7,0.318003558488419
+"D","real, excl. suppressed",8,0.64611565987918
+"D","simulated, marginal target",1,0
+"D","simulated, marginal target",2,0.00124804992199688
+"D","simulated, marginal target",3,0.021996879875195
+"D","simulated, marginal target",4,0.043213728549142
+"D","simulated, marginal target",5,0.0906916276651066
+"D","simulated, marginal target",6,0.128549141965679
+"D","simulated, marginal target",7,0.237389495579823
+"D","simulated, marginal target",8,0.476911076443058
+"D","simulated, conditional target",1,0
+"D","simulated, conditional target",2,0
+"D","simulated, conditional target",3,0
+"D","simulated, conditional target",4,0
+"D","simulated, conditional target",5,0.00309660047122181
+"D","simulated, conditional target",6,0.0372938404577583
+"D","simulated, conditional target",7,0.230831369909122
+"D","simulated, conditional target",8,0.728778189161898
+"E","real assay",250,56
+"E","real assay",500,73
+"E","real assay",1000,109
+"E","real assay",2000,147
+"E","real assay",5000,226
+"E","real assay",10000,320
+"E","real assay",14855,392
+"E","simulated, allele states",250,42
+"E","simulated, allele states",500,48
+"E","simulated, allele states",1000,54
+"E","simulated, allele states",2000,59
+"E","simulated, allele states",5000,133
+"E","simulated, allele states",10000,239
+"E","simulated, allele states",14855,291
+"E","simulated, old binary encoding",250,3
+"E","simulated, old binary encoding",500,3
+"E","simulated, old binary encoding",1000,3
+"E","simulated, old binary encoding",2000,3
+"E","simulated, old binary encoding",5000,3
+"E","simulated, old binary encoding",10000,5
+"E","simulated, old binary encoding",14855,5

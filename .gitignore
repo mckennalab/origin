@@ -30,3 +30,20 @@
 *.iml
 .ipynb_checkpoints/
 Untitled*.ipynb
+
+# Raw recorder datasets. saxe/ is a 19GB GEO download (GSM8791703, HL60 FLARE
+# amplicons); like data/ it is fetched separately rather than committed.
+/saxe/
+
+# Simulation runs under analysis/results. Each results directory holds small
+# summary tables at its top level -- the ones the figures read -- and beneath
+# them the pipeline output for every run, which is gigabytes. The summaries are
+# kept; the run subdirectories are not.
+/analysis/results/*/calibrated/
+/analysis/results/*/sweep_*/
+/analysis/results/*/empirical_rates/
+/analysis/results/*/fitted_shape/
+/analysis/results/*/shipped_shape*/
+/analysis/results/*/simulation/
+/analysis/results/*/reconstruction*/
+/analysis/results/*/*/condition*/

@@ -523,6 +523,25 @@ are defined by `nuclease_targets`; the backend assigns one known pegRNA from a
 pool to each target. Every pool entry has its own editing efficiency, and every
 integration inherits the same target-to-pegRNA layout plus a unique static ID.
 
+By default each target installs a single fixed edit. Setting
+`marks_per_target` gives every site an alphabet of that many marks instead, one
+of which is drawn when the site edits — the PEtracer design ([Science 2025](https://www.science.org/doi/10.1126/science.adx3800)),
+where each of 3 edit sites per cassette receives one of 8 predefined 5nt marks.
+This matters for reconstruction rather than realism: with one outcome per site,
+two cells that edit the same site independently are indistinguishable from two
+cells sharing an ancestor, and that homoplasy misleads tree building. With `N`
+marks they differ `(N - 1) / N` of the time. Marks are taken from the pool in
+blocks, so the pool needs at least `marks_per_target` entries. `pegRNA`
+efficiency then sets which mark wins when the site fires, not whether it fires,
+which the site's own rate governs.
+
+See `example_json_params/petracer_gillespie.json` for a runnable PEtracer
+configuration — 12 cassettes, 3 sites each, 8 marks per site, at the published
+0.05–0.1 edits per site per day. Note that editing accrues per unit of simulated
+time rather than per division, so expected saturation over `sim_length` T is
+`1 - (1 - p)^(T / cell_cycle_length)`; that preset reaches 0.68, inside the
+60–80% band the paper reports as maximising reconstruction accuracy.
+
 The pool can be a CSV referenced relative to the parameter JSON:
 
 ```json
@@ -826,6 +845,7 @@ base editing:
 "nuclease_targets" / "be_targets": {
     "num_targets": <int|null>,
     "edit_rate_class_fractions": { "high": 0.4, "medium": 0, "low": 0.6 },
+    "edit_rate_dispersion_shape": <float>,    // optional; default 0.5
     "editing_window": {
         "size": <int>,
         "decaying": <bool>,
@@ -843,6 +863,16 @@ base editing:
 Targets are split into High/Medium/Low edit-rate classes; editing-window
 expansion either propagates the same rate or *decays* it by 1–2 "degrees"
 (High→Medium→Low→background) according to `drop_editrate`.
+
+Within that, each target's rate is drawn from a gamma distribution with the
+configured mean and `edit_rate_dispersion_shape`, whose coefficient of variation
+is `1 / sqrt(shape)`. Smaller values spread target rates further apart, pushing
+mass towards both a dead tail and a fast tail that saturates early in the
+lineage. The default of 0.5 (CV 1.41) is kept for backwards compatibility, but
+measured constructs can be considerably more dispersed: a 34-barcode BASELINE
+recording was reproduced at about 0.09 (CV 3.4), where 0.5 produced no saturated
+targets at all against 17% observed. See
+`analysis/cli/clone84_simulation_match.R`.
 
 `be_conversion_pattern` (e.g. `"A --> G"`) declares which base→base substitution
 the BE produces; `classify_be_mutation_type` then dispatches the BE rate into
