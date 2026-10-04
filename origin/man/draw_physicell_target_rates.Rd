@@ -4,7 +4,12 @@
 \alias{draw_physicell_target_rates}
 \title{Draw class-stratified per-target mutation probabilities}
 \usage{
-draw_physicell_target_rates(target_classes, mean_probability, shape = 0.5)
+draw_physicell_target_rates(
+  target_classes,
+  mean_probability,
+  shape = 0.5,
+  empirical = NULL
+)
 }
 \arguments{
 \item{target_classes}{Named `High`/`Medium`/`Low` classes; an empty vector
@@ -17,6 +22,11 @@ non-negative value, and zero returns all-zero rates.}
 coefficient of variation `1 / sqrt(shape)`. Must be one finite positive
 value. Set per target block with `edit_rate_dispersion_shape`; see
 [physicell_target_dispersion()].}
+
+\item{empirical}{Optional numeric vector of measured per-division rates. When
+supplied, each target draws from it independently and both
+`mean_probability` and `shape` are ignored, along with the class
+stratification; see [physicell_target_empirical_rates()].}
 }
 \value{
 A named numeric vector of probabilities capped just below one.

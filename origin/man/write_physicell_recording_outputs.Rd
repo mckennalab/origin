@@ -11,7 +11,11 @@ write_physicell_recording_outputs(
   show_progress = FALSE,
   write_lineage = TRUE,
   progress_updates = 20L,
-  compress_csv = TRUE
+  compress_csv = TRUE,
+  write_allele_matrix = FALSE,
+  write_mutation_events = FALSE,
+  write_profiles = FALSE,
+  write_barcode_fasta = FALSE
 )
 }
 \arguments{
@@ -28,6 +32,17 @@ write_physicell_recording_outputs(
 \item{progress_updates}{Approximate number of progress messages to emit.}
 
 \item{compress_csv}{Whether the CSVs are gzip-compressed.}
+
+\item{write_allele_matrix}{Whether the raw allele matrix is written
+(`barcode_alleles.csv`, or `barcode_alleles_sparse.rds` in compact mode).
+Downstream tree building reads the binary score matrix, not this one.}
+
+\item{write_mutation_events}{Whether `mutation_events.csv` is written.}
+
+\item{write_profiles}{Whether `barcode_profiles.rds` is written.}
+
+\item{write_barcode_fasta}{Whether per-cell sequences are reconstructed into
+`barcode_sequences.fasta`.}
 }
 \value{
 Invisibly, a list with the normalized `output_dir`,
@@ -40,11 +55,23 @@ emitting an allele matrix and a binary score matrix. PALINCODE models use the
 one-hot character matrix as that score matrix, and both PALINCODE and
 prime-editing models duplicate the pair under recorder-specific names.
 }
+\section{Optional outputs}{
+ The four `write_*` arguments above default to
+  `FALSE`. On a 49,060-cell, 10-integration run the output phase took 3,909
+  of the pipeline's 4,697 seconds -- 83% of the whole thing, against 16% for
+  the simulation it was writing -- and every second of that went to files the
+  analyses here never open. Turning them off leaves the binary score matrix,
+  the character matrices, the target layout, the manifest and the lineage
+  outputs, which is what callers actually read. Ask for the others
+  explicitly when a caller needs them.
+}
+
 \section{Side effects}{
- Writes the allele and binary-score matrices,
-  `mutation_events.csv`, `barcode_target_layout.csv`, `barcode_profiles.rds`,
-  and `run_manifest.csv` under `output_dir`; a generic barcode model also
-  writes `barcode_reference.fasta`, and its dense output additionally writes
-  `barcode_sequences.fasta`.
+ Always writes the binary-score matrix,
+  `barcode_target_layout.csv` and `run_manifest.csv` under `output_dir`, plus
+  `barcode_reference.fasta` for a generic barcode model and the PALINCODE or
+  prime-editing state and character matrices where those apply. The allele
+  matrix, `mutation_events.csv`, `barcode_profiles.rds` and
+  `barcode_sequences.fasta` are written only when asked for.
 }
 

@@ -244,6 +244,30 @@ engine unless you specifically need the legacy path's outputs.
   are configured through `prime_editing_backend` and `palincode_adapter` rather
   than `be_targets`
 
+## Adding a recorder
+
+A recorder registers itself; the simulator consults the registry at each hook
+point, so sourcing the file that defines it is enough to dispatch it:
+
+```{r register}
+register_origin_recorder(
+  "my_recorder",
+  applies = function(model) isTRUE(model$is_my_recorder),
+  prepare = function(model, params) attach_my_recorder(model, params),
+  mutate = mutate_my_recorder_segment,
+  character_matrix = function(raw_alleles, binary_scores, model, integrations) {
+    my_character_matrix(raw_alleles, model, integrations)
+  }
+)
+origin_active_recorder(model)
+```
+
+`origin_active_recorder()` is the check worth making before trusting a run. It
+answers from the registry rather than from the model, so it cannot report a
+recorder that was configured but never wired -- which is the mistake the
+registry exists to prevent, and one that otherwise produces a complete,
+plausible-looking run of the default model.
+
 ## What the parameters do not tell you
 
 Two relations in this engine cannot be read off the parameter values. Both are
