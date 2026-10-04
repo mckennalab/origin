@@ -38,6 +38,8 @@ if (!exists("origin_root", inherits = TRUE)) {
 
 origin_core_files <- c(
   "recorder_registry.R",
+  "response_curves.R",
+  "params_builder.R",
   "prime_editing.R",
   "physicell_lineage.R",
   "physicell_mito.R",

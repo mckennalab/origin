@@ -243,3 +243,104 @@ engine unless you specifically need the legacy path's outputs.
 - `?prepare_physicell_recording_model` for prime editing and PALINCODE, which
   are configured through `prime_editing_backend` and `palincode_adapter` rather
   than `be_targets`
+
+## What the parameters do not tell you
+
+Two relations in this engine cannot be read off the parameter values. Both are
+cheap to measure and expensive to assume.
+
+### The editing rate is nominal
+
+A target's configured per-division probability is not the probability it ends up
+edited per division. On a BASELINE geometry the effective rate came out at
+0.019–0.023 against a nominal 0.055, so reaching a measured saturation needed
+about 109 divisions where inverting the nominal rate said 30. Calibrations built
+on the nominal rate miss by roughly threefold.
+
+`origin_rate_response()` measures it. You supply the rates and a function that
+writes a rate into the parameter list, because which field carries the rate
+depends on the recorder:
+
+```{r rate-response}
+setter <- function(params, rate) {
+  for (type in names(params$cell_type_dict$cell_type_params)) {
+    params$cell_type_dict$cell_type_params[[type]]$induced_editing_params$
+      be_mutations_per_target_per_division <- rate
+  }
+  params
+}
+origin_rate_response(params, rates = c(0.005, 0.02, 0.08), apply_rate = setter)
+```
+
+It returns the realised `target_rate` and the `effective_rate_per_division` that
+saturation implies at the depth actually reached.
+
+### Growth is steeply non-linear in the death probability
+
+Expected offspring is `2 * (1 - death)`, but the realised growth per division is
+not that, and near the critical point small changes compound hard. Measured on
+one geometry:
+
+| death | growth per division |
+|-------|---------------------|
+| 0.45  | 1.214 |
+| 0.50  | 1.151 |
+| 0.52  | 1.116 |
+| 0.55  | 1.072 |
+| 0.58  | 1.006 |
+
+Interpolating 0.52 from the 0.45 point predicts 1.08 rather than 1.116. Over 72
+divisions that is the difference between about 5,000 cells and about 50,000 —
+enough to turn a short probe into one that never finishes.
+
+```{r growth-response}
+origin_growth_response(params, deaths = c(0.45, 0.50, 0.55, 0.58))
+```
+
+Measure before choosing a death probability for a deep run. `max_cells` will not
+rescue an overshoot: reaching it **ends** the run rather than subsampling, so it
+truncates the depth it was meant to preserve.
+
+## Which matrix is which
+
+A run writes three cell-by-feature matrices and they are not interchangeable.
+
+| matrix | contents |
+|--------|----------|
+| `state_matrix` | the raw allele at every recorded position: `0` wild type, `-1` deleted, integers for substitutions, fractional values for insertions |
+| `character_matrix` | what tree building reads |
+| `logical_target_matrix` | one column per logical target, for recorders whose targets span several positions |
+
+The one that matters is `character_matrix`, because reconstruction consumes it.
+What it holds depends on the recorder: a mark-based recorder puts its mark
+identities there, while a recorder without an alphabet falls back to binary
+scores. That fallback is lossy where it should not be — a nuclease array whose
+deletions carry distinct breakpoints had every one of them collapsed to
+"edited", leaving independent events indistinguishable from shared ancestry, and
+on one comparison that was 6 distinguishable outcomes where the construct
+produced 411. A recorder with distinguishable outcomes should supply a
+`character_matrix` hook through `register_origin_recorder()` rather than letting
+the binary fallback apply.
+
+## Building the parameter list
+
+`origin_params()` fills the nested structure from flat arguments and validates
+on the way in, so a configuration error is reported where it is made rather than
+deep inside the simulator:
+
+```{r builder}
+params <- origin_params(sim_length = 10, founders = 20, death = 0.45,
+                        barcode_length = 100, integrations = 5,
+                        be_rate = 0.01, targets = 20)
+run_gillespie_lineage_pipeline(params, params_path = NULL,
+                               output_dir = "run", 
+                               overrides = list(modalities = "barcode"))
+```
+
+The result is an ordinary parameter list, so anything it does not cover can be
+set on it afterwards. Two defaults are worth knowing: the editing block is
+shared between the induced and uninduced states, which is what stops them
+drifting apart in a hand-written list; and the barcode composition is all-A with
+an A to G conversion, so every position is an eligible target. A uniform
+composition leaves only about a quarter of them editable and quietly quarters
+the recorder.
