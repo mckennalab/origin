@@ -37,6 +37,7 @@ if (!exists("origin_root", inherits = TRUE)) {
 }
 
 origin_core_files <- c(
+  "recorder_registry.R",
   "prime_editing.R",
   "physicell_lineage.R",
   "physicell_mito.R",

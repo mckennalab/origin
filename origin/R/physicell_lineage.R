@@ -2535,7 +2535,7 @@ prepare_physicell_recording_model <- function(params,
     stop('physicell_adapter.recorder_system must be one non-empty string.')
   }
 
-  list(
+  model <- list(
     barcode_sequence = barcode_sequence,
     barcode_length = barcode_length,
     num_integrations = num_integrations,
@@ -2562,6 +2562,10 @@ prepare_physicell_recording_model <- function(params,
     ))),
     rate_sets = rate_sets
   )
+  # Registered recorders attach their own state here. See recorder_registry.R:
+  # doing this through the registry rather than by assigning over this function
+  # is what makes a recorder either dispatched or absent, never half installed.
+  origin_apply_recorder_prepare(model, params)
 }
 
 #' Create an empty barcode profile in the model's storage representation
@@ -3540,6 +3544,12 @@ mutate_physicell_barcode_segment <- function(profile,
                                              rate_set,
                                              model,
                                              segment_start = 0){
+  recorder_mutate <- origin_recorder_hook(model, 'mutate')
+  if(!is.null(recorder_mutate)){
+    return(recorder_mutate(profile = profile, duration = duration,
+                           rate_set = rate_set, model = model,
+                           segment_start = segment_start))
+  }
   if(isTRUE(model$is_prime_editing)){
     return(mutate_prime_editing_segment(
       profile,
@@ -4960,6 +4970,10 @@ physicell_palincode_character_matrix <- function(state_matrix, model){
 #'   probabilities, and outcome fractions; generic models report the position,
 #'   edit-rate class, and the base-editor reference and destination bases.
 physicell_baseline_target_layout <- function(model){
+  recorder_layout <- origin_recorder_hook(model, 'layout')
+  if(!is.null(recorder_layout)){
+    return(recorder_layout(model))
+  }
   if(isTRUE(model$is_prime_editing)){
     targets <- model$prime_editing$targets
     return(do.call(rbind, lapply(

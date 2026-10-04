@@ -805,6 +805,10 @@ lineage_benchmark_character_matrix <- function(raw_alleles,
                                                binary_scores,
                                                model,
                                                integrations){
+  hook <- origin_recorder_hook(model, 'character_matrix')
+  if(!is.null(hook)){
+    return(hook(raw_alleles, binary_scores, model, integrations))
+  }
   physicell_prime_character_matrix(raw_alleles, binary_scores, model)
 }
 
