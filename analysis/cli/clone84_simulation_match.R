@@ -45,9 +45,47 @@
 # to 0.5. Reporting both is the point: it separates "the framework cannot
 # reproduce this" from "the framework's dispersion default is wrong".
 #
+# A third configuration drops the family altogether:
+#
+#   empirical measured per-site rates, sampled directly
+#
+# Neither gamma fit reproduces the reference shape -- the best fitted one still
+# reads 0.236 mean site rate against 0.305, with 10.4% saturated against 17.3%
+# and 54.1% near-dead against 38.7% -- because one dispersion parameter cannot
+# raise the top tail without also deepening the bottom one. The empirical mode
+# takes the rates from the FULL recording rather than the 250-cell reference:
+# at a median 7,364 cells per site the sampling error on each is under 0.006, so
+# the empirical distribution is essentially the true one, whereas at 250 cells
+# 23% of sites read exactly zero purely from the floor. Cumulative fractions are
+# inverted to per-division rates by r = 1 - (1 - p)^(1/divisions) and passed as
+# be_targets$edit_rate_empirical.
+#
+# The gamma fits already correct for the sampling floor by resampling candidate
+# rates through the reference's own denominators, so this is a comparison of
+# rate MODELS, not of one model against a better-observed target. What it does
+# also change is the class stratification, which the empirical path drops; see
+# physicell_target_empirical_rates() for why.
+#
 # Arguments:
 #   --reference=<dir>    output of clone84_reference_subset.R (required)
 #   --output-dir=<dir>   destination (required)
+#   --empirical-input=<csv>  full clone 84 matrix. When given, a third
+#                        configuration samples per-target rates from the
+#                        measured per-site rates instead of a gamma.
+#   --empirical-min-cells=<n>  sites needing fewer observations than this are
+#                        dropped from the empirical pool. Default 50.
+#   --empirical-response=<csv>  measured `rate,cumulative` response of the
+#                        simulator at this geometry. When given, target
+#                        fractions are inverted through it instead of through
+#                        1 - (1 - p)^(1/divisions). The analytic form is wrong
+#                        here: the simulator's implied exposure is about 9.5
+#                        divisions at low rates rising past 20 at high ones, not
+#                        the nominal 30, so inverting analytically undershoots
+#                        every target and collapses the saturated tail.
+#   --configurations=<list>  which of shipped_shape0.5, fitted_shape,
+#                        empirical_rates to run. Default all available. Rows for
+#                        configurations not run are carried over from the
+#                        existing summary rather than dropped.
 #   --divisions=<n>      cell cycles to simulate. Default 30.
 #   --cells=<n>          cells to subsample. Default 250.
 #   --integrations=<n>   Default 10.
@@ -72,6 +110,13 @@ if (is.null(reference_dir) || is.null(output_dir)) {
   stop("--reference and --output-dir are required.", call. = FALSE)
 }
 reference_dir <- normalizePath(reference_dir, mustWork = TRUE)
+empirical_input <- value_after("--empirical-input")
+empirical_min_cells <- as.integer(value_after("--empirical-min-cells", "50"))
+empirical_response <- value_after("--empirical-response")
+requested_configurations <- {
+  raw <- value_after("--configurations", "")
+  if (nzchar(raw)) strsplit(raw, ",", fixed = TRUE)[[1L]] else character()
+}
 divisions <- as.integer(value_after("--divisions", "30"))
 cell_count <- as.integer(value_after("--cells", "250"))
 integration_count <- as.integer(value_after("--integrations", "10"))
@@ -128,6 +173,64 @@ cat(sprintf("[calibrate] shipped shape 0.5 -> mean %.5f (distance %.4f)\n",
 cat(sprintf("[calibrate] fitted shape %.4f -> mean %.5f (distance %.4f)\n",
             fitted_shape, fitted_mean, distance_for(fitted_mean, fitted_shape)))
 
+# ---- Empirical per-target rates ----------------------------------------------
+# Read from the full recording, not the reference subset. The reference reads
+# each site on ~250 cells, where a site editing at 0.5% shows zero about a
+# quarter of the time; the full recording reads a median 7,364 cells per site,
+# where the standard error on any one rate is under 0.006. Using the subset
+# would hand the simulator the sampling floor as though it were the construct.
+empirical_rates <- NULL
+if (!is.null(empirical_input)) {
+  cat("[empirical] reading the full recording\n")
+  full <- data.table::fread(normalizePath(empirical_input, mustWork = TRUE),
+                            header = TRUE, colClasses = "character",
+                            showProgress = FALSE)
+  target_columns <- grepl("-[0-9]+$", colnames(full))
+  observed_counts <- vapply(which(target_columns), function(column) {
+    sum(full[[column]] %in% c("0", "1"))
+  }, numeric(1))
+  cumulative <- vapply(which(target_columns), function(column) {
+    values <- full[[column]]
+    kept <- values %in% c("0", "1")
+    if (sum(kept) < empirical_min_cells) return(NA_real_)
+    mean(values[kept] == "1")
+  }, numeric(1))
+  rm(full)
+  cumulative <- cumulative[is.finite(cumulative)]
+  # Cumulative edit fraction at the end of the run, inverted to the per-division
+  # rate the simulator consumes. A site read at exactly 1 gives only a lower
+  # bound on its rate, so it is capped rather than sent to infinity.
+  if (is.null(empirical_response)) {
+    empirical_rates <- 1 - (1 - pmin(cumulative, 1 - 1e-9))^(1 / divisions)
+    cat("[empirical] inverted analytically; see --empirical-response\n")
+  } else {
+    # Invert through what the simulator actually does rather than through the
+    # nominal division count. The response is monotone, so interpolating the
+    # curve backwards is well defined; ties are resolved to the lowest rate
+    # that reaches the fraction.
+    response <- utils::read.csv(normalizePath(empirical_response,
+                                              mustWork = TRUE),
+                                stringsAsFactors = FALSE)
+    if (!all(c("rate", "cumulative") %in% names(response))) {
+      stop("--empirical-response needs rate and cumulative columns.",
+           call. = FALSE)
+    }
+    response <- response[order(response$cumulative, response$rate), ]
+    response <- response[!duplicated(response$cumulative), ]
+    empirical_rates <- stats::approx(response$cumulative, response$rate,
+                                     xout = cumulative, rule = 2)$y
+    cat(sprintf("[empirical] inverted through %d response points from %s\n",
+                nrow(response), basename(empirical_response)))
+  }
+  empirical_rates <- pmin(pmax(empirical_rates, 0), 1 - .Machine$double.eps)
+  cat(sprintf("[empirical] %d sites (>= %d cells, median %.0f); cumulative mean %.4f, dead %.3f, saturated %.3f\n",
+              length(empirical_rates), empirical_min_cells,
+              stats::median(observed_counts), mean(cumulative),
+              mean(cumulative == 0), mean(cumulative == 1)))
+  cat(sprintf("[empirical] per-division rate: mean %.5f, median %.5f\n",
+              mean(empirical_rates), stats::median(empirical_rates)))
+}
+
 # ---- Simulation parameters ---------------------------------------------------
 editing_state <- list(
   be_mutations_per_target_per_division = shipped_mean,
@@ -144,9 +247,13 @@ editing_state <- list(
   mt_bg_insertion_prob_per_division = 0,
   mt_bg_deletion_prob_per_division = 0
 )
-build_params <- function(mean_rate, shape) {
+build_params <- function(mean_rate, shape, empirical = NULL) {
   state <- editing_state
   state$be_mutations_per_target_per_division <- mean_rate
+  # The empirical path never reads the shape, but the block still has to be a
+  # valid one, so it carries the default rather than the NA the summary uses to
+  # mark "no gamma here".
+  if (!is.null(empirical) || !is.finite(shape)) shape <- 0.5
   list(
     num_init_cells = founders,
     sim_length = list(sim_time),
@@ -165,6 +272,9 @@ build_params <- function(mean_rate, shape) {
       config = "S:1:0",
       edit_rate_class_fractions = list(high = 0.4, medium = 0, low = 0.6),
       edit_rate_dispersion_shape = shape,
+      # Present only in the empirical configuration; when it is, the mean and
+      # the shape above are ignored, and so is the class split.
+      edit_rate_empirical = empirical,
       editing_window = list(size = 0, decaying = FALSE, close_after_edit = FALSE)
     ),
     editing_induction = list(timepoint = 0, num_cells = NULL, frac_cells = 1),
@@ -189,12 +299,18 @@ build_params <- function(mean_rate, shape) {
 }
 
 #' Summarise one simulated run against the reference.
-run_configuration <- function(label, mean_rate, shape) {
-  cat(sprintf("\n[run] %s: shape %.4f, mean %.5f\n", label, shape, mean_rate))
+run_configuration <- function(label, mean_rate, shape, empirical = NULL) {
+  if (is.null(empirical)) {
+    cat(sprintf("\n[run] %s: shape %.4f, mean %.5f\n", label, shape, mean_rate))
+  } else {
+    cat(sprintf("\n[run] %s: %d measured rates, mean %.5f\n", label,
+                length(empirical), mean(empirical)))
+  }
   run_dir <- file.path(output_dir, label)
   dir.create(run_dir, recursive = TRUE, showWarnings = FALSE)
   result <- run_gillespie_lineage_pipeline(
-    build_params(mean_rate, shape), params_path = NULL, output_dir = run_dir,
+    build_params(mean_rate, shape, empirical), params_path = NULL,
+    output_dir = run_dir,
     # Barcode only: the mitochondrial path initialises its model regardless of
     # num_mt_genomes being zero, and this run has no mitochondrial component.
     overrides = list(progress = FALSE, seed = seed, modalities = "barcode")
@@ -234,16 +350,32 @@ run_configuration <- function(label, mean_rate, shape) {
     rows <- sample(nrow(matrix_form), depth)
     mean(matrix_form[rows, column] == 1L)
   }, numeric(1))
-  list(label = label, mean_rate = mean_rate, shape = shape,
+  list(label = label, mean_rate = if (is.null(empirical)) mean_rate else
+         mean(empirical),
+       shape = if (is.null(empirical)) shape else NA_real_,
        site_rate = site_rate, edits_per_cell = rowSums(matrix_form == 1L),
        positions = ncol(matrix_form), cells = nrow(matrix_form),
        generation = stats::median(as.numeric(alive$generation)))
 }
 
-runs <- list(
-  run_configuration("shipped_shape0.5", shipped_mean, 0.5),
-  run_configuration("fitted_shape", fitted_mean, fitted_shape)
-)
+wanted <- function(label) {
+  !length(requested_configurations) || label %in% requested_configurations
+}
+runs <- list()
+if (wanted("shipped_shape0.5")) {
+  runs[[length(runs) + 1L]] <- run_configuration("shipped_shape0.5",
+                                                 shipped_mean, 0.5)
+}
+if (wanted("fitted_shape")) {
+  runs[[length(runs) + 1L]] <- run_configuration("fitted_shape", fitted_mean,
+                                                 fitted_shape)
+}
+if (!is.null(empirical_rates) && wanted("empirical_rates")) {
+  runs[[length(runs) + 1L]] <- run_configuration(
+    "empirical_rates", mean(empirical_rates), NA_real_,
+    empirical = empirical_rates)
+}
+if (!length(runs)) stop("No configurations selected.", call. = FALSE)
 # ---- Compare -----------------------------------------------------------------
 reference_edits <- reference_cells$edited
 reference_observed <- reference_cells$observed
@@ -283,6 +415,22 @@ reference_row <- data.frame(
   quantile_distance = 0, stringsAsFactors = FALSE
 )
 summary_table <- rbind(reference_row, summary_table)
+# A partial re-run replaces only its own rows; the rest stand as last measured.
+carry_over <- function(existing, ran) {
+  path <- file.path(output_dir, existing)
+  if (!file.exists(path)) return(NULL)
+  previous <- utils::read.csv(path, stringsAsFactors = FALSE)
+  previous[!(previous$configuration %in% c("reference", ran)), , drop = FALSE]
+}
+ran_labels <- vapply(runs, function(run) run$label, character(1))
+if (length(requested_configurations)) {
+  kept <- carry_over("match_summary.csv", ran_labels)
+  if (!is.null(kept) && nrow(kept)) {
+    cat(sprintf("[merge] carrying over: %s\n",
+                paste(kept$configuration, collapse = ", ")))
+    summary_table <- rbind(summary_table, kept[, names(summary_table)])
+  }
+}
 utils::write.csv(summary_table, file.path(output_dir, "match_summary.csv"),
                  row.names = FALSE)
 site_rates <- do.call(rbind, c(
@@ -293,6 +441,12 @@ site_rates <- do.call(rbind, c(
                stringsAsFactors = FALSE)
   })
 ))
+if (length(requested_configurations)) {
+  kept <- carry_over("site_rates.csv", ran_labels)
+  if (!is.null(kept) && nrow(kept)) {
+    site_rates <- rbind(site_rates, kept[, names(site_rates)])
+  }
+}
 utils::write.csv(site_rates, file.path(output_dir, "site_rates.csv"),
                  row.names = FALSE)
 

@@ -196,7 +196,7 @@ results <- parallel::mclapply(seq_len(nrow(tasks)), function(position) {
 scores <- do.call(rbind, Filter(Negate(is.null), results))
 if (is.null(scores)) stop("Nothing scored.", call. = FALSE)
 
-scores_path <- file.path(output_dir, "dropout_scores.tsv.gz")
+scores_path <- file.path(output_dir, "gillespie_dropout_scores.tsv.gz")
 connection <- gzfile(scores_path, open = "wt")
 write.table(scores, connection, sep = "\t", row.names = FALSE, quote = FALSE)
 close(connection)
@@ -224,7 +224,7 @@ summary_table <- do.call(rbind, lapply(
 summary_table <- summary_table[order(summary_table$system,
                                      summary_table$cell_dropout,
                                      summary_table$integration_dropout), ]
-write.table(summary_table, file.path(output_dir, "dropout_summary.tsv"),
+write.table(summary_table, file.path(output_dir, "gillespie_dropout_summary.tsv"),
             sep = "\t", row.names = FALSE, quote = FALSE)
 
 jsonlite::write_json(list(
@@ -241,4 +241,4 @@ print(baseline_rows[, c("integration_dropout", "cell_dropout", "replicates",
                         "mean_cells", "mean_normalized_rf")],
       row.names = FALSE, digits = 3)
 cat(sprintf("\nWrote:\n  %s\n  %s\n", scores_path,
-            file.path(output_dir, "dropout_summary.tsv")))
+            file.path(output_dir, "gillespie_dropout_summary.tsv")))

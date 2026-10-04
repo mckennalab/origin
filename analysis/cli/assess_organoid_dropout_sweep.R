@@ -217,7 +217,7 @@ clone_scores <- do.call(rbind, Filter(Negate(is.null), results))
 if (is.null(clone_scores)) stop("No clone scored under any condition.",
                                 call. = FALSE)
 
-scores_path <- file.path(output_dir, "dropout_clone_scores.tsv.gz")
+scores_path <- file.path(output_dir, "organoid_dropout_clone_scores.tsv.gz")
 connection <- gzfile(scores_path, open = "wt")
 write.table(clone_scores, connection, sep = "\t", row.names = FALSE,
             quote = FALSE)
@@ -244,7 +244,7 @@ summary_table <- do.call(rbind, lapply(
 ))
 summary_table <- summary_table[order(summary_table$cell_dropout,
                                      summary_table$integration_dropout), ]
-write.table(summary_table, file.path(output_dir, "dropout_summary.tsv"),
+write.table(summary_table, file.path(output_dir, "organoid_dropout_summary.tsv"),
             sep = "\t", row.names = FALSE, quote = FALSE)
 
 jsonlite::write_json(list(
@@ -261,4 +261,4 @@ print(summary_table[, c("integration_dropout", "cell_dropout", "clones",
                         "mean_leaves", "mean_normalized_rf", "exact_fraction")],
       row.names = FALSE, digits = 3)
 cat(sprintf("\nWrote:\n  %s\n  %s\n", scores_path,
-            file.path(output_dir, "dropout_summary.tsv")))
+            file.path(output_dir, "organoid_dropout_summary.tsv")))
