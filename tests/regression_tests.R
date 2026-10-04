@@ -2114,7 +2114,10 @@ dir.create(baseline_output_path)
 baseline_output <- physicell_env$write_physicell_recording_outputs(
   baseline_recording,
   baseline_model,
-  baseline_output_path
+  baseline_output_path,
+  # This assertion block checks mutation_events.csv.gz exists, which is now an
+  # opt-in output rather than one every caller pays for.
+  write_mutation_events = TRUE
 )
 baseline_layout <- physicell_env$read_physicell_csv(
   file.path(baseline_output_path, 'barcode_target_layout.csv')

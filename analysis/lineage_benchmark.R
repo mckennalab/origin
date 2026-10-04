@@ -782,6 +782,32 @@ lineage_benchmark_subset_rows <- function(matrix_value, sample_ids){
 #'   `int_<n>_target_<i>`, rows in `state_matrix` order.
 #' @note Requires the Matrix package, and rejects any window wider than 52
 #'   positions because the bitmask would exceed exact double precision.
+#' Build the character matrix tree building will read
+#'
+#' The dispatch point for recorder-specific character encodings. Tree building
+#' consumes `character_matrix`, so whatever this returns is what a reconstruction
+#' method actually sees -- which makes it the place a recorder either keeps its
+#' allele alphabet or loses it. A WT-Cas9 array is the case in point: its
+#' deletions carry distinct breakpoints, and returning binary scores collapses
+#' every one of them to "edited", leaving independent events indistinguishable
+#' from shared ancestry.
+#'
+#' The default is the prime-editing rule, which returns the mark identities when
+#' a recorder has a mark alphabet and binary scores otherwise. Recorders injected
+#' by a harness override this.
+#'
+#' @param raw_alleles Cell-by-position allele matrix.
+#' @param binary_scores Cell-by-position binary score matrix.
+#' @param model Prepared recording model.
+#' @param integrations Integrations to encode.
+#' @return A cell-by-character matrix.
+lineage_benchmark_character_matrix <- function(raw_alleles,
+                                               binary_scores,
+                                               model,
+                                               integrations){
+  physicell_prime_character_matrix(raw_alleles, binary_scores, model)
+}
+
 lineage_benchmark_logical_target_matrix <- function(state_matrix,
                                                     model,
                                                     integrations){
@@ -1500,7 +1526,12 @@ simulate_lineage_benchmark_recorder <- function(population_bundle,
     output_dir,
     show_progress = show_progress,
     write_lineage = FALSE,
-    compress_csv = TRUE
+    compress_csv = TRUE,
+    # This benchmark reads the allele matrix back and records the mutation
+    # event file in its condition manifest, so it asks for both rather than
+    # taking the writer's defaults.
+    write_allele_matrix = TRUE,
+    write_mutation_events = TRUE
   )
   saveRDS(output_model, file.path(output_dir, 'recording_model.rds'))
   lineage_benchmark_write_json(
@@ -1707,8 +1738,9 @@ write_lineage_benchmark_condition <- function(recording,
     # one site indistinguishable from shared ancestry. Every other recorder,
     # and prime editing with a single mark, still gets the binary scores.
     character_matrix <- lineage_benchmark_subset_matrix(
-      physicell_prime_character_matrix(
-        recording$raw_alleles, recording$binary_scores, recording$model
+      lineage_benchmark_character_matrix(
+        recording$raw_alleles, recording$binary_scores, recording$model,
+        integrations
       ),
       sample_ids,
       integrations

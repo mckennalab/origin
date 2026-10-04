@@ -1394,6 +1394,45 @@ physicell_target_dispersion <- function(target_spec, default = 0.5){
   as.numeric(shape)
 }
 
+#' Read a target block's empirical per-target editing rates
+#'
+#' An alternative to the Gamma dispersion model for recorders where the real
+#' per-target rates have been measured. `edit_rate_empirical` supplies those
+#' rates directly and `draw_physicell_target_rates()` then samples targets from
+#' them, so the simulated rate distribution is the measured one by construction
+#' rather than whatever a one-parameter family can be bent into.
+#'
+#' Two deliberate differences from the Gamma path. The mean rate is ignored,
+#' because the supplied rates carry their own mean; and the Low/Medium/High
+#' stratification is dropped, because it forces every integration to the same
+#' class composition and so suppresses the between-integration spread that
+#' independent sampling produces. In a 34-barcode BASELINE recording the
+#' observed between-integration SD of the mean rate was 0.0223 against the
+#' 0.0250 expected from independent sampling of 272 sites -- that is, no
+#' integration-level effect at all -- while the stratified simulation produced
+#' 0.002.
+#'
+#' Rates are per division, so measured cumulative edit fractions must be
+#' inverted first: `r = 1 - (1 - p)^(1 / divisions)`.
+#'
+#' @export
+#' @param target_spec One JSON target block, or `NULL` for the default.
+#' @return A numeric vector of per-division rates, or `NULL` when the block
+#'   does not supply any.
+physicell_target_empirical_rates <- function(target_spec){
+  if(is.null(target_spec) || is.null(target_spec$edit_rate_empirical)){
+    return(NULL)
+  }
+  rates <- unlist(target_spec$edit_rate_empirical, use.names = FALSE)
+  # Deliberately not coerced from character, for the same reason the dispersion
+  # shape is not: quoted numbers in a parameter file are a mistake in the file.
+  if(!is.numeric(rates) || length(rates) == 0 || any(!is.finite(rates)) ||
+     any(rates < 0) || any(rates > 1)){
+    stop('Target edit_rate_empirical must be finite numbers in [0, 1].')
+  }
+  as.numeric(rates)
+}
+
 #' Draw class-stratified per-target mutation probabilities
 #'
 #' Samples 1000 gamma variates with the requested shape and mean, cuts them at
@@ -1411,11 +1450,28 @@ physicell_target_dispersion <- function(target_spec, default = 0.5){
 #'   coefficient of variation `1 / sqrt(shape)`. Must be one finite positive
 #'   value. Set per target block with `edit_rate_dispersion_shape`; see
 #'   [physicell_target_dispersion()].
+#' @param empirical Optional numeric vector of measured per-division rates. When
+#'   supplied, each target draws from it independently and both
+#'   `mean_probability` and `shape` are ignored, along with the class
+#'   stratification; see [physicell_target_empirical_rates()].
 #' @return A named numeric vector of probabilities capped just below one.
 draw_physicell_target_rates <- function(target_classes, mean_probability,
-                                        shape = 0.5){
+                                        shape = 0.5, empirical = NULL){
   if(length(target_classes) == 0){
     return(setNames(numeric(), character()))
+  }
+  if(!is.null(empirical)){
+    empirical <- as.numeric(empirical)
+    if(length(empirical) == 0 || any(!is.finite(empirical)) ||
+       any(empirical < 0)){
+      stop('Empirical target rates must be finite and non-negative.')
+    }
+    # Independent draws, not class-stratified: stratifying would hand every
+    # integration the same rate composition and flatten the between-integration
+    # spread the measured construct actually shows.
+    rates <- sample(empirical, length(target_classes), replace = TRUE)
+    return(setNames(pmin(rates, 1 - .Machine$double.eps),
+                    names(target_classes)))
   }
   mean_probability <- as.numeric(mean_probability)
   if(length(mean_probability) != 1 || !is.finite(mean_probability) ||
@@ -1550,10 +1606,19 @@ physicell_rate_set <- function(params,
     probabilities[[position]] <- position_probabilities
   }
 
+  # Empirical rates are supported for base-editing targets, which is the block
+  # BASELINE-style recorders configure. The nuclease block draws insertion and
+  # deletion rates separately, and one measured edit-rate distribution does not
+  # say how to split itself between the two, so setting it there is an error
+  # rather than a silent no-op.
+  if(!is.null(physicell_target_empirical_rates(params$nuclease_targets))){
+    stop('edit_rate_empirical is supported for be_targets, not nuclease_targets.')
+  }
   be_rates <- draw_physicell_target_rates(
     be_classes,
     state_params$be_mutations_per_target_per_division,
-    shape = physicell_target_dispersion(params$be_targets)
+    shape = physicell_target_dispersion(params$be_targets),
+    empirical = physicell_target_empirical_rates(params$be_targets)
   )
   be_destination <- match(be_to, bases)
   for(position_name in names(be_rates)){
@@ -2561,6 +2626,223 @@ set_physicell_barcode_value <- function(profile,
     profile[integration, position] <- value
   }
   profile
+}
+
+#' Count the bases a recording position can still lose
+#'
+#' A position holds its reference base, plus one inserted base when an
+#' insertion allele is encoded there, and nothing once it has been deleted.
+#' Ported from the legacy `num_deletable_bases()`, adapted to this encoding:
+#' the legacy profile packed several inserted bases into the decimal digits and
+#' counted them with `nchar()`, whereas an insertion here is always a single
+#' base recorded as `index / 10`.
+#'
+#' @export
+#' @param value One encoded allele.
+#' @return The number of bases still present at that position: 0, 1 or 2.
+physicell_deletable_bases <- function(value){
+  if(length(value) != 1 || !is.finite(value)){
+    stop('A recording position must hold one finite encoded allele.')
+  }
+  if(value == -1){
+    return(0L)
+  }
+  # A fractional allele is a reference base followed by one inserted base.
+  if(value %% 1 != 0){
+    return(2L)
+  }
+  1L
+}
+
+#' Delete a run of bases either side of a cut
+#'
+#' Applies a deletion as a genuine interval rather than a state flip at the cut
+#' site. Starting at `position`, the cut consumes that position and then walks
+#' outwards, spending `left_bases` to the left and `right_bases` to the right
+#' and marking each position it empties. This is the legacy
+#' `perform_deletion()` behaviour, with one deliberate change: the legacy
+#' version extended leftward only, commented "for simplicity", which makes the
+#' sampled coordinate the right endpoint and cannot scatter breakpoints
+#' symmetrically about a cut. Resection happens on both sides, so both are
+#' drawn.
+#'
+#' A position holding an insertion has two bases, so a deletion that runs out
+#' of budget against one removes the inserted base and leaves the reference,
+#' which this encoding can express; anything larger empties the position.
+#'
+#' @export
+#' @param profile Barcode profile, dense or sparse.
+#' @param integration Integration index.
+#' @param position Cut coordinate; always consumed.
+#' @param left_bases Bases to remove to the left of the cut.
+#' @param right_bases Bases to remove to the right of the cut.
+#' @param barcode_length Number of positions, used to stop at the ends.
+#' @return A list with the updated `profile` and the `positions` emptied,
+#'   which is what an event record needs to report the span.
+apply_physicell_deletion <- function(profile,
+                                     integration,
+                                     position,
+                                     left_bases,
+                                     right_bases,
+                                     barcode_length){
+  left_bases <- max(0L, as.integer(left_bases))
+  right_bases <- max(0L, as.integer(right_bases))
+
+  # The integration is read once into a plain vector, walked there, and written
+  # back in one assignment. Walking the profile itself cost a name lookup per
+  # base on a sparse barcode, and a resected cut touches over a hundred of
+  # them: a 500-founder run spent four and a half hours in the barcode pass
+  # against eighteen minutes for the same run at 200 founders.
+  values <- physicell_barcode_row(profile, integration, barcode_length)
+  # 0 bases once deleted, 2 where an insertion sits beside the reference, else 1.
+  costs <- ifelse(values == -1, 0L, ifelse(values %% 1 != 0, 2L, 1L))
+
+  # One side of the cut, resolved without stepping. Walking outward, a position
+  # is reached only while budget remains, is emptied when its bases fit, and
+  # ends the run when they do not -- all three follow from the cumulative cost
+  # along the run, so the whole side is a vector operation.
+  side <- function(coordinates, budget){
+    if(!length(coordinates) || budget <= 0){
+      return(list(emptied = integer(), partial = integer()))
+    }
+    run <- costs[coordinates]
+    before <- cumsum(run) - run
+    remaining <- budget - before
+    reached <- remaining > 0
+    emptied <- reached & run > 0L & run <= remaining
+    partial <- which(reached & run > 0L & run > remaining)
+    cutoff <- if(length(partial)) partial[[1L]] else length(coordinates) + 1L
+    emptied <- emptied & seq_along(coordinates) < cutoff
+    list(emptied = coordinates[emptied],
+         partial = if(length(partial)) coordinates[[cutoff]] else integer())
+  }
+
+  left <- side(if(position > 1L) seq.int(position - 1L, 1L) else integer(),
+               left_bases)
+  right <- side(if(position < barcode_length)
+                  seq.int(position + 1L, barcode_length) else integer(),
+                right_bases)
+
+  emptied <- c(if(costs[position] > 0L) position else integer(),
+               left$emptied, right$emptied)
+  partial <- c(left$partial, right$partial)
+  if(length(emptied)){
+    values[emptied] <- -1
+  }
+  if(length(partial)){
+    # Budget covered the inserted base only; the reference base survives.
+    values[partial] <- 0
+  }
+  changed <- c(emptied, partial)
+  if(length(changed)){
+    profile <- set_physicell_barcode_values(profile, integration, changed,
+                                            values[changed])
+  }
+  list(profile = profile, positions = sort(emptied))
+}
+
+#' Read one integration of a barcode profile as a plain vector
+#'
+#' Sparse profiles store positions by name, so reading them one coordinate at a
+#' time costs a lookup per base. Anything walking a range should take the row
+#' once and work on the result.
+#'
+#' @export
+#' @param profile Barcode profile, dense or sparse.
+#' @param integration Integration index.
+#' @param barcode_length Number of positions to return.
+#' @return A numeric vector of length `barcode_length`, zero where unedited.
+physicell_barcode_row <- function(profile, integration, barcode_length){
+  if(inherits(profile, 'physicell_sparse_barcode')){
+    stored <- profile[[integration]]
+    values <- numeric(barcode_length)
+    if(length(stored)){
+      indices <- suppressWarnings(as.integer(names(stored)))
+      keep <- !is.na(indices) & indices >= 1L & indices <= barcode_length
+      values[indices[keep]] <- unname(stored[keep])
+    }
+    return(values)
+  }
+  as.numeric(profile[integration, seq_len(barcode_length)])
+}
+
+#' Write several encoded alleles into one integration at once
+#'
+#' The single-position writer allocates a fresh profile per base; a resected
+#' deletion changes a whole run, so it writes them together.
+#'
+#' @export
+#' @param profile Barcode profile, dense or sparse.
+#' @param integration Integration index.
+#' @param positions Positions to write.
+#' @param values Encoded alleles, parallel to `positions`.
+#' @return The updated profile.
+set_physicell_barcode_values <- function(profile, integration, positions,
+                                         values){
+  if(!length(positions)){
+    return(profile)
+  }
+  if(inherits(profile, 'physicell_sparse_barcode')){
+    profile[[integration]][as.character(positions)] <- values
+  } else{
+    profile[integration, positions] <- values
+  }
+  profile
+}
+
+#' Draw how far a deletion resects either side of its cut
+#'
+#' Both extents come from `ceiling(rgamma(1, shape, rate))`, the legacy length
+#' model, drawn separately so the two ends are independent. Defaults are the
+#' legacy `shape = 1, rate = 1`, which is a mean-one exponential: that keeps
+#' existing behaviour recognisable but will not reach the long deletions a real
+#' Cas9 array shows, so a construct being matched to data should set its own.
+#'
+#' @section Two classes: Measured deletion lengths are not one distribution.
+#'   In the GSM8791703 HL60 recording, 33.5% of events are 26bp or shorter with
+#'   mean 8.7 -- a cut repaired locally, never reaching the next target 26bp
+#'   away -- and 66.5% are longer with mean 130.5. A single gamma fitted to
+#'   both describes neither: it comes out at shape 1.68 and sits between the
+#'   modes. Supplying `local` makes the draw a mixture, so that share of cuts
+#'   uses the short component and the rest resect.
+#'
+#' @export
+#' @param spec Deletion extent block, or `NULL` for the defaults. Shaped as
+#'   `list(left = list(shape =, rate =), right = list(shape =, rate =),
+#'   local = list(probability =, shape =, rate =))`, where `local` is optional.
+#' @return A named integer vector with `left` and `right` base counts.
+draw_physicell_deletion_extent <- function(spec = NULL){
+  local_block <- if(is.null(spec)) NULL else spec$local
+  if(!is.null(local_block)){
+    probability <- unlist(local_block$probability, use.names = FALSE)
+    if(!is.numeric(probability) || length(probability) != 1 ||
+       !is.finite(probability) || probability < 0 || probability > 1){
+      stop('Deletion extent local probability must be one number in [0, 1].')
+    }
+    if(stats::runif(1L) < probability){
+      spec <- list(left = list(shape = local_block$shape,
+                               rate = local_block$rate),
+                   right = list(shape = local_block$shape,
+                                rate = local_block$rate))
+    }
+  }
+  side <- function(name){
+    block <- if(is.null(spec)) NULL else spec[[name]]
+    shape <- if(is.null(block$shape)) 1 else
+      unlist(block$shape, use.names = FALSE)
+    rate <- if(is.null(block$rate)) 1 else
+      unlist(block$rate, use.names = FALSE)
+    if(!is.numeric(shape) || length(shape) != 1 || !is.finite(shape) ||
+       shape <= 0 || !is.numeric(rate) || length(rate) != 1 ||
+       !is.finite(rate) || rate <= 0){
+      stop(sprintf(
+        'Deletion extent %s must give one finite positive shape and rate.',
+        name
+      ))
+    }
+    as.integer(ceiling(stats::rgamma(1L, shape = shape, rate = rate)))
+  }
+  c(left = side('left'), right = side('right'))
 }
 
 #' Report whether an editing window already carries an edit
@@ -4865,20 +5147,40 @@ write_physicell_lineage_outputs <- function(nodes,
 #' @param write_lineage Whether to also write the shared lineage outputs.
 #' @param progress_updates Approximate number of progress messages to emit.
 #' @param compress_csv Whether the CSVs are gzip-compressed.
+#' @param write_allele_matrix Whether the raw allele matrix is written
+#'   (`barcode_alleles.csv`, or `barcode_alleles_sparse.rds` in compact mode).
+#'   Downstream tree building reads the binary score matrix, not this one.
+#' @param write_mutation_events Whether `mutation_events.csv` is written.
+#' @param write_profiles Whether `barcode_profiles.rds` is written.
+#' @param write_barcode_fasta Whether per-cell sequences are reconstructed into
+#'   `barcode_sequences.fasta`.
 #' @return Invisibly, a list with the normalized `output_dir`,
 #'   `terminal_profiles`, `raw_alleles`, and `binary_scores`.
-#' @section Side effects: Writes the allele and binary-score matrices,
-#'   `mutation_events.csv`, `barcode_target_layout.csv`, `barcode_profiles.rds`,
-#'   and `run_manifest.csv` under `output_dir`; a generic barcode model also
-#'   writes `barcode_reference.fasta`, and its dense output additionally writes
-#'   `barcode_sequences.fasta`.
+#' @section Optional outputs: The four `write_*` arguments above default to
+#'   `FALSE`. On a 49,060-cell, 10-integration run the output phase took 3,909
+#'   of the pipeline's 4,697 seconds -- 83% of the whole thing, against 16% for
+#'   the simulation it was writing -- and every second of that went to files the
+#'   analyses here never open. Turning them off leaves the binary score matrix,
+#'   the character matrices, the target layout, the manifest and the lineage
+#'   outputs, which is what callers actually read. Ask for the others
+#'   explicitly when a caller needs them.
+#' @section Side effects: Always writes the binary-score matrix,
+#'   `barcode_target_layout.csv` and `run_manifest.csv` under `output_dir`, plus
+#'   `barcode_reference.fasta` for a generic barcode model and the PALINCODE or
+#'   prime-editing state and character matrices where those apply. The allele
+#'   matrix, `mutation_events.csv`, `barcode_profiles.rds` and
+#'   `barcode_sequences.fasta` are written only when asked for.
 write_physicell_recording_outputs <- function(simulation,
                                               model,
                                               output_dir,
                                               show_progress = FALSE,
                                               write_lineage = TRUE,
                                               progress_updates = 20L,
-                                              compress_csv = TRUE){
+                                              compress_csv = TRUE,
+                                              write_allele_matrix = FALSE,
+                                              write_mutation_events = FALSE,
+                                              write_profiles = FALSE,
+                                              write_barcode_fasta = FALSE){
   dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
   if(!dir.exists(output_dir)){
     stop(sprintf('Could not create output directory: %s.', output_dir))
@@ -4937,10 +5239,12 @@ write_physicell_recording_outputs <- function(simulation,
       }
       scores
     }
-    saveRDS(
-      raw_alleles,
-      file.path(output_dir, 'barcode_alleles_sparse.rds')
-    )
+    if(write_allele_matrix){
+      saveRDS(
+        raw_alleles,
+        file.path(output_dir, 'barcode_alleles_sparse.rds')
+      )
+    }
     saveRDS(
       binary_scores,
       file.path(output_dir, 'barcode_binary_score_matrix_sparse.rds')
@@ -4988,12 +5292,14 @@ write_physicell_recording_outputs <- function(simulation,
     } else{
       (raw_alleles != 0) * 1L
     }
-    write_physicell_csv(
-      raw_alleles,
-      file.path(output_dir, 'barcode_alleles.csv'),
-      row.names = TRUE,
-      compress = compress_csv
-    )
+    if(write_allele_matrix){
+      write_physicell_csv(
+        raw_alleles,
+        file.path(output_dir, 'barcode_alleles.csv'),
+        row.names = TRUE,
+        compress = compress_csv
+      )
+    }
     write_physicell_csv(
       binary_scores,
       file.path(output_dir, 'barcode_binary_score_matrix.csv'),
@@ -5037,12 +5343,14 @@ write_physicell_recording_outputs <- function(simulation,
     'Barcode output: writing mutation events and target layout.',
     enabled = show_progress
   )
-  write_physicell_csv(
-    simulation$mutation_events,
-    file.path(output_dir, 'mutation_events.csv'),
-    row.names = FALSE,
-    compress = compress_csv
-  )
+  if(write_mutation_events){
+    write_physicell_csv(
+      simulation$mutation_events,
+      file.path(output_dir, 'mutation_events.csv'),
+      row.names = FALSE,
+      compress = compress_csv
+    )
+  }
   target_layout <- physicell_baseline_target_layout(model)
   write_physicell_csv(
     target_layout,
@@ -5068,10 +5376,12 @@ write_physicell_recording_outputs <- function(simulation,
     },
     enabled = show_progress
   )
-  saveRDS(
-    terminal_profiles,
-    file.path(output_dir, 'barcode_profiles.rds')
-  )
+  if(write_profiles){
+    saveRDS(
+      terminal_profiles,
+      file.path(output_dir, 'barcode_profiles.rds')
+    )
+  }
 
   if(!isTRUE(model$is_palincode) && !isTRUE(model$is_prime_editing)){
     writeLines(
@@ -5083,28 +5393,31 @@ write_physicell_recording_outputs <- function(simulation,
     )
   }
 
-  if(!isTRUE(model$compact_output) &&
+  if(write_barcode_fasta &&
+     !isTRUE(model$compact_output) &&
      !isTRUE(model$is_palincode) &&
      !isTRUE(model$is_prime_editing)){
     physicell_log_stage(
       'Barcode output: writing reconstructed barcode FASTA.',
       enabled = show_progress
     )
-    fasta_lines <- character()
-    for(cell_name in names(terminal_profiles)){
+    # Built per cell and flattened once. Appending to one growing vector
+    # reallocated it on every integration of every cell, which on a 49,060-cell
+    # run was quadratic and dominated the whole pipeline.
+    per_cell <- lapply(names(terminal_profiles), function(cell_name){
       profile <- terminal_profiles[[cell_name]]
-      for(integration in seq_len(nrow(profile))){
-        fasta_lines <- c(
-          fasta_lines,
+      unlist(lapply(seq_len(nrow(profile)), function(integration){
+        c(
           paste0('>', cell_name, '_int_', integration),
           physicell_profile_to_sequence(
             profile[integration, ],
             model$barcode_sequence
           )
         )
-      }
-    }
-    writeLines(fasta_lines, file.path(output_dir, 'barcode_sequences.fasta'))
+      }), use.names = FALSE)
+    })
+    writeLines(unlist(per_cell, use.names = FALSE),
+               file.path(output_dir, 'barcode_sequences.fasta'))
   }
 
   physicell_log_stage(

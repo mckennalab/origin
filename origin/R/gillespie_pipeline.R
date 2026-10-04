@@ -237,6 +237,13 @@ run_gillespie_lineage_pipeline <- function(params,
   founder_label_sites <- as.integer(value('founder_label_sites', 0L))
   mt_genomes_per_cell <- as.integer(value('mt_genomes_per_cell', 8L))
   write_mt_fasta <- isTRUE(value('write_mt_fasta', FALSE))
+  # Off by default: on a large run these four files cost more than the
+  # simulation that produced them, and nothing downstream of tree building
+  # opens any of them. See write_physicell_recording_outputs().
+  write_allele_matrix <- isTRUE(value('write_allele_matrix', FALSE))
+  write_mutation_events <- isTRUE(value('write_mutation_events', FALSE))
+  write_profiles <- isTRUE(value('write_profiles', FALSE))
+  write_barcode_fasta <- isTRUE(value('write_barcode_fasta', FALSE))
 
   dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
   if(!dir.exists(output_dir)){
@@ -357,7 +364,11 @@ run_gillespie_lineage_pipeline <- function(params,
       show_progress = progress,
       write_lineage = FALSE,
       progress_updates = progress_updates,
-      compress_csv = compress_csv
+      compress_csv = compress_csv,
+      write_allele_matrix = write_allele_matrix,
+      write_mutation_events = write_mutation_events,
+      write_profiles = write_profiles,
+      write_barcode_fasta = write_barcode_fasta
     )
     timings$finish('Barcode output')
   }
