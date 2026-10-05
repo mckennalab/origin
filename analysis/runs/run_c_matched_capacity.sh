@@ -108,12 +108,25 @@ run_budget () {
     done
   done
 
-  announce "C/$budget: summarise"
+  announce "C/$budget: summarise, assess and plot"
   Rscript "$REPO_ROOT/analysis/cli/summarize_matched_targets_nj.R" "$output_root"
   for shape in ${shapes//,/ }; do
     Rscript "$REPO_ROOT/analysis/cli/assess_matched_targets_trees.R" \
       "$output_root" "$output_root/matched_tree_metrics_$shape" "$shape"
   done
+  # The figure. A single-shape budget gets the per-recorder metric panel; the
+  # all-shapes budget gets the across-shape panel instead, at k=5 clones, which
+  # is the granularity that panel reads at.
+  mkdir -p "$REPO_ROOT/analysis/figures"
+  if [ "$budget" = "allshapes" ]; then
+    Rscript "$REPO_ROOT/analysis/cli/plot_allshapes_recorder_metrics.R" \
+      "$output_root" "$REPO_ROOT/analysis/figures/allshapes_matched_information" 5
+  else
+    Rscript "$REPO_ROOT/analysis/cli/plot_matched_recorder_metrics.R" \
+      "$output_root" "$REPO_ROOT/analysis/figures/${budget}_matched_metrics" \
+      "matched $budget budget, neutral trees, 250 cells" \
+      "matched_tree_metrics_neutral"
+  fi
   announce "C/$budget: done -> $output_root"
 }
 

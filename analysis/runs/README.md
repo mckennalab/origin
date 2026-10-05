@@ -7,6 +7,7 @@ anything tracked.
 
 | script | what it produces |
 |--------|------------------|
+| `run_0_source_benchmark.sh` | the simulated populations every other run reads from; 7.1GB, and the prerequisite for all of them |
 | `run_a_recorder_parameter_grid.sh` | 5 recorders x 5 rate tiers x 4 shapes x 5 seeds x 6 methods (500 conditions) |
 | `run_b_integration_series.sh` | every recorder at 1 to 100 integrations, neutral shape, neighbour joining |
 | `run_c_matched_capacity.sh` | three capacity-matched comparisons: 100 targets, 133 bits, and 133 bits across all shapes |
@@ -20,8 +21,18 @@ bash analysis/runs/run_a_recorder_parameter_grid.sh
 The harness scripts and the cliqueR package live in a separate checkout. The
 scripts look for it beside this one; set `CLIQUE_DIR` if it is somewhere else.
 They also need a source benchmark to sample lineages from, defaulting to
-`output/lineage_benchmark_20260819_173705`; set `SOURCE_BENCHMARK` to use a
-different one.
+`output/lineage_benchmark_20260819_173705`. If that directory is absent, build
+one with `run_0_source_benchmark.sh` and point the others at it:
+
+```bash
+bash analysis/runs/run_0_source_benchmark.sh
+export SOURCE_BENCHMARK=$PWD/output/lineage_benchmark_<timestamp>
+```
+
+Run 0 is the expensive step and is where an end-to-end rebuild starts. Note that
+its systems list does not include `wt_crispr`: the FLARE recorder is injected by
+the harness when the grid is generated rather than being one of the sweep's
+native systems.
 
 Everything is overridable from the environment, which is how to run a subset:
 
