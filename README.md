@@ -23,17 +23,31 @@ neural-organoid workflow.
 ### The simulator package
 
 `origin/` is a standard R package and installs with no dependencies beyond
-`Matrix`:
+`Matrix`.
 
-```bash
-R CMD INSTALL origin
+**The package currently lives on the `aaron_3d` branch, not on the default
+branch `heterogeneous`, which has no `origin/` directory at all.** Until it is
+merged, every install has to name the branch; omitting it is what produces
+
+```
+In normalizePath(path) : path[1]="origin": No such file or directory
 ```
 
-or from R:
+Straight from GitHub, without cloning:
 
 ```r
 install.packages("remotes")
-remotes::install_local("origin")
+remotes::install_github("aaronmck/remote_mito_clean", subdir = "origin",
+                        ref = "aaron_3d")
+```
+
+Or from a clone, where the commands below assume you are in the repository
+root:
+
+```bash
+git clone -b aaron_3d https://github.com/aaronmck/remote_mito_clean.git
+cd remote_mito_clean
+R CMD INSTALL origin
 ```
 
 Then:
@@ -64,6 +78,10 @@ source("load_origin.R")            # core + analysis
 origin_include_analysis <- FALSE
 source("load_origin.R")            # core only
 ```
+
+This needs a clone, and R's working directory must be the repository root.
+`load_origin.R` resolves its own path, so `source("/full/path/load_origin.R")`
+works from anywhere.
 
 ### What else you need, and only when
 
