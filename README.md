@@ -25,29 +25,32 @@ neural-organoid workflow.
 `origin/` is a standard R package and installs with no dependencies beyond
 `Matrix`.
 
-**The package currently lives on the `aaron_3d` branch, not on the default
-branch `heterogeneous`, which has no `origin/` directory at all.** Until it is
-merged, every install has to name the branch; omitting it is what produces
-
-```
-In normalizePath(path) : path[1]="origin": No such file or directory
-```
+The canonical repository is <https://github.com/mckennalab/origin>, which is
+private; you need access to it, and `remotes` needs a GitHub token (see
+`?gitcreds::gitcreds_set`). The package lives in the `origin/` subdirectory of
+that repository, not at its root.
 
 Straight from GitHub, without cloning:
 
 ```r
 install.packages("remotes")
-remotes::install_github("aaronmck/remote_mito_clean", subdir = "origin",
-                        ref = "aaron_3d")
+remotes::install_github("mckennalab/origin", subdir = "origin")
 ```
 
 Or from a clone, where the commands below assume you are in the repository
 root:
 
 ```bash
-git clone -b aaron_3d https://github.com/aaronmck/remote_mito_clean.git
-cd remote_mito_clean
+git clone https://github.com/mckennalab/origin.git
+cd origin
 R CMD INSTALL origin
+```
+
+Running `R CMD INSTALL origin` from anywhere other than the repository root, or
+against a checkout of a branch that predates the package, gives
+
+```
+In normalizePath(path) : path[1]="origin": No such file or directory
 ```
 
 Then:
