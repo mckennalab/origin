@@ -18,6 +18,94 @@ recording data on its branches. See
 [`ORGANOID_SIMULATION.md`](ORGANOID_SIMULATION.md) for the 2,500-founder
 neural-organoid workflow.
 
+## 0. Install and run
+
+### The simulator package
+
+`origin/` is a standard R package and installs with no dependencies beyond
+`Matrix`:
+
+```bash
+R CMD INSTALL origin
+```
+
+or from R:
+
+```r
+install.packages("remotes")
+remotes::install_local("origin")
+```
+
+Then:
+
+```r
+library(origin)
+params <- origin_params(sim_length = 10, founders = 20, death = 0.45,
+                        barcode_length = 100, integrations = 5,
+                        be_rate = 0.01, targets = 20)
+run_gillespie_lineage_pipeline(params, params_path = NULL,
+                               output_dir = "run",
+                               overrides = list(modalities = "barcode"))
+```
+
+`vignette("gillespie-quickstart", package = "origin")` is the place to start.
+It covers building parameters, the two relations the parameter values do not
+predict, which of the three output matrices tree building reads, and how to
+register a recorder.
+
+### Without installing
+
+The analysis tier is sourced rather than installed, and the clique harness
+replaces simulator functions at run time, which only works in the global
+environment. For either, use the loader instead of `library(origin)`:
+
+```r
+source("load_origin.R")            # core + analysis
+origin_include_analysis <- FALSE
+source("load_origin.R")            # core only
+```
+
+### What else you need, and only when
+
+The package itself needs `Matrix`. Everything beyond that is for a specific
+tier, so install it when you reach that tier rather than up front:
+
+| for | packages |
+|-----|----------|
+| the analysis tier (`analysis/`) | `ape`, `phangorn`, `mclust`, `data.table`, `jsonlite` |
+| figures | `ggplot2`, `ragg`, `patchwork` |
+| tests | `testthat` |
+
+```r
+install.packages(c("ape", "phangorn", "mclust", "data.table", "jsonlite",
+                   "ggplot2", "ragg", "patchwork", "testthat"))
+```
+
+Tree reconstruction is a separate checkout, `clique_2025_12_10`, holding the
+`cliqueR` package and the benchmark harness. Its methods shell out to external
+tools: IQ-TREE 2 (`iqtree2`), PHYLIP (`mix`), and Cassiopeia as a Python module
+reached through `reticulate`. Neighbour joining, parsimony and VINE need none of
+those, so a run limited to them has nothing external to install.
+
+The conda environment in section 3 belongs to the legacy `sim5` engine in
+`legacy/`, not to this package. It pulls BEAST 2, `babette`, `muscle` and
+`samtools`, none of which `origin` uses.
+
+### Reproducing the large-scale runs
+
+`analysis/runs/` holds one driver per family of simulation, each running
+simulate, reconstruct, summarise and plot end to end. Start with the source
+benchmark every other run reads from:
+
+```bash
+bash analysis/runs/run_0_source_benchmark.sh
+export SOURCE_BENCHMARK=$PWD/output/lineage_benchmark_<timestamp>
+bash analysis/runs/run_a_recorder_parameter_grid.sh
+```
+
+See `analysis/runs/README.md` for scale, overrides and what each run produces.
+Outputs land in `output/`, which is ignored.
+
 ## 1. Purpose
 
 `remote_mito_clean` is an R-based forward-time simulation of a growing cell
@@ -74,7 +162,10 @@ Rscript convert_scoremats_to_csvs.r    │  → output/score_mats/<run_id>/csvs/
 parse_rf_results.ipynb (optional, post-hoc)  → heatmaps
 ```
 
-## 3. Environment
+## 3. Environment (legacy sim5 engine)
+
+This section covers the legacy `sim5` engine in `legacy/`, not the `origin`
+package; see section 0 for installing and running `origin`.
 
 The conda environment is defined by `heavy_sim_env.yml` (env name in the file:
 `babette_2_backup`). It pulls a large stack from `conda-forge` / `bioconda`,
@@ -94,7 +185,10 @@ conda env create -f heavy_sim_env.yml
 conda activate babette_2_backup
 ```
 
-## 4. Running a simulation
+## 4. Running a simulation (legacy sim5 engine)
+
+The command below drives the legacy `sim5` engine. For the `origin` package see
+section 0; for the large-scale benchmark runs see `analysis/runs/`.
 
 The single user-facing command is the bash wrapper:
 
