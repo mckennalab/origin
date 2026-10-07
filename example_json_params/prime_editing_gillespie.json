@@ -1,0 +1,68 @@
+{
+  "simulation_engine": "gillespie",
+  "num_init_cells": 1,
+  "sim_length": [6],
+  "random_seed": 47,
+  "consider_cell_heteroplasmy_scores": false,
+  "bc_length": 40,
+  "barcode_sequence": null,
+  "bc_nuc_composition": {
+    "frac_a": 0.25,
+    "frac_g": 0.25,
+    "frac_c": 0.25,
+    "frac_t": 0.25
+  },
+  "max_bc_ints_per_cell": [5],
+  "editing_induction": {
+    "timepoint": 0
+  },
+  "nuclease_targets": {
+    "num_targets": 4,
+    "edit_rate_class_fractions": {
+      "high": 1,
+      "medium": 0,
+      "low": 0
+    },
+    "config": "S:5:5",
+    "editing_window": {
+      "size": 0,
+      "decaying": false,
+      "close_after_edit": true
+    },
+    "prime_editing_system": true
+  },
+  "prime_editing_backend": {
+    "enabled": true,
+    "pegRNA_pool_path": "../data/example_pegRNA_pool.csv",
+    "assignment": "cycle",
+    "target_pegRNA_ids": ["peg_A", "peg_B", "peg_C", "peg_D"],
+    "induced_edit_probability_per_cell_cycle": 0.4,
+    "uninduced_edit_probability_per_cell_cycle": 0.0,
+    "static_id_length": 12
+  },
+  "physicell_adapter": {
+    "recorder_system": "prime editing",
+    "profile_storage": "sparse",
+    "compact_output": true,
+    "retain_internal_profiles": false
+  },
+  "gillespie": {
+    "modalities": ["barcode"],
+    "num_integrations": 5,
+    "max_cells": 100000,
+    "progress": true,
+    "progress_updates": 20,
+    "compress_csv": true
+  },
+  "cell_type_dict": {
+    "founder_cell_type": "cycling",
+    "cell_type_params": {
+      "cycling": {
+        "cell_cycle_length": 1,
+        "death_per_cell_cycle_prob": 0
+      }
+    },
+    "uninduced_transition_matrix": [[1]],
+    "induced_transition_matrix": [[1]]
+  }
+}

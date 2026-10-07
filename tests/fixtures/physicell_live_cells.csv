@@ -1,0 +1,4 @@
+ID,parent_ID,x,y,z,neighbor_IDs,branch_length_to_parent
+0,-1,0,0,0,"2;3",-1
+2,0,1,0,0,0,2
+3,1,0,1,0,0,1.5

@@ -1,0 +1,5 @@
+pegRNA_id,edit_sequence,editing_efficiency,spacer_sequence,pbs_sequence,rtt_sequence,description
+peg_A,AGGCT,0.90,GACTGACTGACTGACTGACT,CGTACGTAC,AGGCT,high-efficiency programmed edit
+peg_B,CTTGA,0.65,TGCATGCATGCATGCATGCA,TGCATGCAT,CTTGA,medium-efficiency programmed edit
+peg_C,GACCA,0.35,ACGTACGTACGTACGTACGT,ACGTACGTA,GACCA,low-efficiency programmed edit
+peg_D,TGGAT,0.10,CAGTCAGTCAGTCAGTCAGT,AGTCAGTCA,TGGAT,rare programmed edit

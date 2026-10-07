@@ -1,0 +1,370 @@
+---
+title: "Running a Gillespie simulation"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Running a Gillespie simulation}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", eval = FALSE)
+```
+
+`origin` grows a cell population in continuous time and replays lineage-recorder
+state along the resulting branches. This vignette covers the two entry points
+you are most likely to want: simulating a population on its own, and running the
+full pipeline that also records barcodes and writes results to disk.
+
+Every code block here has been run as written. The numbers quoted in the text
+come from those runs with `seed = 1`; your values will differ if you change the
+seed, because a single-founder branching process has very high variance.
+
+```{r library}
+library(origin)
+```
+
+## Parameters are a plain list
+
+The simulator takes a nested list. In a pipeline that list normally comes from a
+JSON file via `jsonlite::fromJSON(path, simplifyVector = FALSE)`, but nothing
+requires a file — building it in R is often clearer when you are exploring.
+
+Use `simplifyVector = FALSE` when you do read JSON. The parameter reader expects
+scalars to arrive as length-one lists, and the simplifying reader collapses some
+of them into vectors that then fail validation.
+
+## Simulating a population
+
+The smallest useful configuration is one cell type and one founder:
+
+```{r population}
+params <- list(
+  num_init_cells = 1,
+  sim_length = list(6),
+  random_seed = 1,
+  editing_induction = list(timepoint = 0, num_cells = NULL, frac_cells = 1),
+  differentiation_induction = list(timepoint = 0, num_cells = NULL, frac_cells = 1),
+  cell_type_dict = list(
+    founder_cell_type = "progenitor",
+    cell_type_params = list(
+      progenitor = list(
+        cell_cycle_length = 1,
+        death_per_cell_cycle_prob = 0.01
+      )
+    ),
+    uninduced_transition_matrix = list(list(1)),
+    induced_transition_matrix = list(list(1))
+  )
+)
+
+population <- simulate_gillespie_population(
+  params,
+  end_time = 6,
+  seed = 1,
+  max_cells = 100000L,
+  show_progress = FALSE
+)
+```
+
+`cell_cycle_length` is the *mean* of an exponential division clock, not a fixed
+interval, so the division hazard is `1 / cell_cycle_length`.
+`death_per_cell_cycle_prob` is a per-cycle probability and is converted
+internally to the hazard `-log(1 - p) / cell_cycle_length`. The two are not
+interchangeable: anything named `*_hazard` in this package is per unit time,
+while anything named `*_prob_per_*` is per cell cycle.
+
+The transition matrices give, for each parent type, the probabilities of each
+daughter type. Both daughters are drawn independently, so a division can produce
+two of the same fate. With one cell type the matrix is the 1-by-1 `list(list(1))`
+above.
+
+The result carries the lineage and a summary of what happened:
+
+```{r inspect}
+population$counts
+#>          founders         divisions            deaths stochastic_events
+#>                 1              1439                16              1455
+#>             nodes  surviving_cells
+#>              2880             1424
+
+nrow(population$nodes)          #> 2880  every branch segment ever created
+nrow(population$terminal_nodes) #> 1424  leaves, including lineages that died
+```
+
+`nodes` is the full event-resolved lineage: one row per branch segment, with
+`birth_time`, `end_time`, `generation`, `cell_type`, and the flags `is_terminal`,
+`alive_at_end` and `died`. Note that `is_terminal` marks a leaf, which includes
+cells that died before the horizon. The cells alive at the end are the ones with
+`alive_at_end`, and those are usually what you want:
+
+```{r alive}
+alive <- population$nodes[population$nodes$alive_at_end %in% c(TRUE, "TRUE"), ]
+nrow(alive)  #> 1424
+```
+
+## Adding a recorder
+
+`run_gillespie_lineage_pipeline()` grows the population and then replays a
+recorder along its branches, writing everything to a directory. Recording needs
+more configuration: a barcode sequence to edit, a target layout, and per-state
+editing rates.
+
+```{r recorder-params}
+editing_state <- list(
+  be_mutations_per_target_per_division = 0.02,
+  nuc_insertions_per_target_per_division = 0,
+  nuc_deletions_per_target_per_division = 0,
+  bc_bg_insertion_prob_per_division = 0,
+  bc_bg_deletion_prob_per_division = 0,
+  bc_substitution_model = "JC",
+  bc_sub_model_params = list(0),
+  mt_substitution_model = "JC",
+  mt_sub_model_params = list(0),
+  mt_bg_insertion_prob_per_division = 0,
+  mt_bg_deletion_prob_per_division = 0
+)
+
+params <- list(
+  num_init_cells = 1,
+  sim_length = list(6),
+  random_seed = 1,
+  bc_length = 300,
+  max_bc_ints_per_cell = list(2),
+  bc_nuc_composition = list(
+    frac_a = 0.25, frac_g = 0.25, frac_c = 0.25, frac_t = 0.25
+  ),
+  be_conversion_pattern = "A --> G",
+  be_targets = list(
+    num_targets = 8,
+    config = "S:10:24",
+    edit_rate_class_fractions = list(high = 0.5, medium = 0, low = 0.5),
+    editing_window = list(size = 0, decaying = FALSE, close_after_edit = FALSE)
+  ),
+  editing_induction = list(timepoint = 0, num_cells = NULL, frac_cells = 1),
+  differentiation_induction = list(timepoint = 0, num_cells = NULL, frac_cells = 1),
+  cell_type_dict = list(
+    founder_cell_type = "progenitor",
+    cell_type_params = list(
+      progenitor = list(
+        cell_cycle_length = 1,
+        death_per_cell_cycle_prob = 0.01,
+        bc_invariant_sites = 0,
+        mt_invariant_sites = 0,
+        induced_editing_params = editing_state,
+        uninduced_editing_params = editing_state
+      )
+    ),
+    uninduced_transition_matrix = list(list(1)),
+    induced_transition_matrix = list(list(1))
+  )
+)
+```
+
+Three of these are easy to get wrong, and each is checked:
+
+- `bc_nuc_composition` is required whenever no `barcode_sequence` file is
+  supplied. Omitting it, or giving only some of `frac_a`/`frac_g`/`frac_c`/
+  `frac_t`, stops the run with a message naming the absent fractions. Fractions
+  that cannot form a sequence, such as four zeros, are rejected too.
+- `config = "S:10:24"` places targets at position 10 and every 25th base after
+  it, so the last of `n` targets sits at `10 + 25 * (n - 1)`. That must fit
+  inside `bc_length`. If it does not, the error reports where the last target
+  landed, the configured `bc_length`, and a target count that would fit, so you
+  do not have to work out which of the four numbers to change.
+- `editing_induction` with `num_cells = 1` induces exactly one cell. With a
+  single founder that covers the whole population, but with several founders it
+  leaves most lineages unedited and every recording downstream is diluted.
+  Because nothing fails, this one raises a **warning** rather than an error,
+  naming how many founders go uninduced. Use `frac_cells = 1` to induce
+  everything. Inducing a subset after time zero is an ordinary design and is not
+  warned about.
+
+Building parameters with `modifyList()` is worth avoiding here: it merges nested
+lists recursively, so overriding `bc_nuc_composition` with a partial list leaves
+the original fractions in place rather than replacing them.
+
+Then run the pipeline:
+
+```{r pipeline}
+output_dir <- file.path(tempdir(), "origin_quickstart")
+result <- run_gillespie_lineage_pipeline(
+  params,
+  params_path = NULL,
+  output_dir = output_dir,
+  overrides = list(progress = FALSE, seed = 1)
+)
+```
+
+`overrides` takes the same options the `gillespie` block of a JSON parameter file
+would carry, so you can set `modalities`, `end_time`, `max_cells` and `seed`
+without editing the parameter list. Pass `params_path` when your parameters name
+files relative to their own location, such as a `barcode_sequence` or a
+prime-editing pegRNA pool; with parameters built in R, `NULL` is correct.
+
+## What it writes
+
+```{r outputs}
+list.files(output_dir)
+```
+
+The run above produced, among others:
+
+| File | Contents |
+| --- | --- |
+| `physicell_lineage_full.nwk` | Newick tree over all nodes |
+| `physicell_lineage_sampled.nwk` | Newick tree over cells alive at the end (1424 tips) |
+| `lineage_nodes.csv.gz` | One row per branch segment, with `generation` and `alive_at_end` |
+| `terminal_cells.csv.gz` | The sampled cells |
+| `barcode_binary_score_matrix.csv.gz` | Cells by positions, 1 where edited (1424 x 600 here, 3245 edits) |
+| `barcode_alleles.csv.gz` | The same shape, carrying allele codes rather than presence |
+| `barcode_target_layout.csv.gz` | Which positions are targets, with their edit-rate class |
+| `mutation_events.csv.gz` | Every recorded edit, with its time and branch |
+| `run_manifest.csv.gz` | The resolved configuration for the run |
+
+The score matrix has one column per (integration, position) named
+`int_<i>_pos_<p>`, covering all positions rather than only those observed edited,
+so its width is `bc_length` times the number of integrations.
+
+## Choosing this engine
+
+The Gillespie engine draws exact continuous event times, so it has no time step
+to tune. The alternative fixed-step path in `legacy/sim5_code.R` discretizes
+time with `time_inc`, and its accuracy and cost both depend on that choice:
+coarse steps systematically undercount the population, while fine steps cost
+proportionally more because every cell is revisited at every step. Prefer this
+engine unless you specifically need the legacy path's outputs.
+
+## Where to go next
+
+- `?simulate_gillespie_population` for the full argument list
+- `?run_gillespie_lineage_pipeline` for the recording stages and every option
+  `overrides` accepts
+- `?prepare_physicell_recording_model` for prime editing and PALINCODE, which
+  are configured through `prime_editing_backend` and `palincode_adapter` rather
+  than `be_targets`
+
+## Adding a recorder
+
+A recorder registers itself; the simulator consults the registry at each hook
+point, so sourcing the file that defines it is enough to dispatch it:
+
+```{r register}
+register_origin_recorder(
+  "my_recorder",
+  applies = function(model) isTRUE(model$is_my_recorder),
+  prepare = function(model, params) attach_my_recorder(model, params),
+  mutate = mutate_my_recorder_segment,
+  character_matrix = function(raw_alleles, binary_scores, model, integrations) {
+    my_character_matrix(raw_alleles, model, integrations)
+  }
+)
+origin_active_recorder(model)
+```
+
+`origin_active_recorder()` is the check worth making before trusting a run. It
+answers from the registry rather than from the model, so it cannot report a
+recorder that was configured but never wired -- which is the mistake the
+registry exists to prevent, and one that otherwise produces a complete,
+plausible-looking run of the default model.
+
+## What the parameters do not tell you
+
+Two relations in this engine cannot be read off the parameter values. Both are
+cheap to measure and expensive to assume.
+
+### The editing rate is nominal
+
+A target's configured per-division probability is not the probability it ends up
+edited per division. On a BASELINE geometry the effective rate came out at
+0.019–0.023 against a nominal 0.055, so reaching a measured saturation needed
+about 109 divisions where inverting the nominal rate said 30. Calibrations built
+on the nominal rate miss by roughly threefold.
+
+`origin_rate_response()` measures it. You supply the rates and a function that
+writes a rate into the parameter list, because which field carries the rate
+depends on the recorder:
+
+```{r rate-response}
+setter <- function(params, rate) {
+  for (type in names(params$cell_type_dict$cell_type_params)) {
+    params$cell_type_dict$cell_type_params[[type]]$induced_editing_params$
+      be_mutations_per_target_per_division <- rate
+  }
+  params
+}
+origin_rate_response(params, rates = c(0.005, 0.02, 0.08), apply_rate = setter)
+```
+
+It returns the realised `target_rate` and the `effective_rate_per_division` that
+saturation implies at the depth actually reached.
+
+### Growth is steeply non-linear in the death probability
+
+Expected offspring is `2 * (1 - death)`, but the realised growth per division is
+not that, and near the critical point small changes compound hard. Measured on
+one geometry:
+
+| death | growth per division |
+|-------|---------------------|
+| 0.45  | 1.214 |
+| 0.50  | 1.151 |
+| 0.52  | 1.116 |
+| 0.55  | 1.072 |
+| 0.58  | 1.006 |
+
+Interpolating 0.52 from the 0.45 point predicts 1.08 rather than 1.116. Over 72
+divisions that is the difference between about 5,000 cells and about 50,000 —
+enough to turn a short probe into one that never finishes.
+
+```{r growth-response}
+origin_growth_response(params, deaths = c(0.45, 0.50, 0.55, 0.58))
+```
+
+Measure before choosing a death probability for a deep run. `max_cells` will not
+rescue an overshoot: reaching it **ends** the run rather than subsampling, so it
+truncates the depth it was meant to preserve.
+
+## Which matrix is which
+
+A run writes three cell-by-feature matrices and they are not interchangeable.
+
+| matrix | contents |
+|--------|----------|
+| `state_matrix` | the raw allele at every recorded position: `0` wild type, `-1` deleted, integers for substitutions, fractional values for insertions |
+| `character_matrix` | what tree building reads |
+| `logical_target_matrix` | one column per logical target, for recorders whose targets span several positions |
+
+The one that matters is `character_matrix`, because reconstruction consumes it.
+What it holds depends on the recorder: a mark-based recorder puts its mark
+identities there, while a recorder without an alphabet falls back to binary
+scores. That fallback is lossy where it should not be — a nuclease array whose
+deletions carry distinct breakpoints had every one of them collapsed to
+"edited", leaving independent events indistinguishable from shared ancestry, and
+on one comparison that was 6 distinguishable outcomes where the construct
+produced 411. A recorder with distinguishable outcomes should supply a
+`character_matrix` hook through `register_origin_recorder()` rather than letting
+the binary fallback apply.
+
+## Building the parameter list
+
+`origin_params()` fills the nested structure from flat arguments and validates
+on the way in, so a configuration error is reported where it is made rather than
+deep inside the simulator:
+
+```{r builder}
+params <- origin_params(sim_length = 10, founders = 20, death = 0.45,
+                        barcode_length = 100, integrations = 5,
+                        be_rate = 0.01, targets = 20)
+run_gillespie_lineage_pipeline(params, params_path = NULL,
+                               output_dir = "run", 
+                               overrides = list(modalities = "barcode"))
+```
+
+The result is an ordinary parameter list, so anything it does not cover can be
+set on it afterwards. Two defaults are worth knowing: the editing block is
+shared between the induced and uninduced states, which is what stops them
+drifting apart in a hand-written list; and the barcode composition is all-A with
+an A to G conversion, so every position is an eligible target. A uniform
+composition leaves only about a quarter of them editable and quietly quarters
+the recorder.

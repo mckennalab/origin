@@ -1,0 +1,110 @@
+{
+  "sim_length": [30240],
+  "mito_genome_length": 16600,
+  "baseline_heteroplasmy_sites_frac": 0.0006,
+  "baseline_heteroplasmy_variant_frac_dist": [0.25, 1.0],
+  "heteroplasmy_variant_transition_prob": 0.95,
+  "bc_length": 1435,
+  "max_bc_ints_per_cell": [5],
+  "barcode_sequence": null,
+  "be_conversion_pattern": "A --> G",
+  "bc_nuc_composition": {
+    "frac_a": 0.25,
+    "frac_g": 0.25,
+    "frac_c": 0.30,
+    "frac_t": 0.20
+  },
+  "be_targets": {
+    "num_targets": 50,
+    "edit_rate_class_fractions": {
+      "high": 0.4,
+      "medium": 0.0,
+      "low": 0.6
+    },
+    "config": "S:10:24",
+    "editing_window": {
+      "size": 7,
+      "decaying": true,
+      "close_after_edit": false
+    }
+  },
+  "nuclease_targets": {
+    "num_targets": null,
+    "edit_rate_class_fractions": {
+      "high": 1.0,
+      "medium": 0.0,
+      "low": 0.0
+    },
+    "config": "U",
+    "editing_window": {
+      "size": 0,
+      "decaying": false,
+      "close_after_edit": false
+    },
+    "prime_editing_system": false
+  },
+  "editing_induction": {
+    "timepoint": 0
+  },
+  "physicell_adapter": {
+    "recorder_system": "BASELINE-like hyperdCas12a-ABE8e",
+    "profile_storage": "sparse",
+    "compact_output": true,
+    "retain_internal_profiles": false
+  },
+  "non_mendelian_selection": {
+    "coefficient": 0.0,
+    "ecdna_label_coefficient": 0.0,
+    "ecdna_recorder_edit_coefficient": 0.0,
+    "mitochondrial_variant_coefficient": 0.0
+  },
+  "ecdna_adapter": {
+    "num_species": 10,
+    "initial_copies_per_species": 5,
+    "labeled_species_fraction": 0.3,
+    "static_id_length": 12,
+    "num_recorder_targets": 6,
+    "edit_probability_per_target_per_cell_cycle": 0.01,
+    "recorder_start_time": 0,
+    "replication_probability": 1.0,
+    "daughter_1_segregation_probability": 0.5,
+    "max_copies_per_cell": 10000,
+    "retain_internal_profiles": false
+  },
+  "cell_type_dict": {
+    "founder_cell_type": "iPSC",
+    "cell_type_params": {
+      "iPSC": {
+        "cell_cycle_length": 1440,
+        "bc_invariant_sites": 0,
+        "mt_invariant_sites": 0,
+        "uninduced_editing_params": {
+          "mt_substitution_model": "HKY",
+          "mt_sub_model_params": [25, 0.000005, 0.0000002],
+          "mt_bg_insertion_prob_per_division": 0.00000005,
+          "mt_bg_deletion_prob_per_division": 0.00000005,
+          "bc_substitution_model": "HKY",
+          "bc_sub_model_params": [3, 0, 0],
+          "bc_bg_insertion_prob_per_division": 0,
+          "bc_bg_deletion_prob_per_division": 0,
+          "be_mutations_per_target_per_division": 0.0001,
+          "nuc_insertions_per_target_per_division": 0,
+          "nuc_deletions_per_target_per_division": 0
+        },
+        "induced_editing_params": {
+          "mt_substitution_model": "HKY",
+          "mt_sub_model_params": [25, 0.000005, 0.0000002],
+          "mt_bg_insertion_prob_per_division": 0.00000005,
+          "mt_bg_deletion_prob_per_division": 0.00000005,
+          "bc_substitution_model": "HKY",
+          "bc_sub_model_params": [3, 0, 0],
+          "bc_bg_insertion_prob_per_division": 0,
+          "bc_bg_deletion_prob_per_division": 0,
+          "be_mutations_per_target_per_division": 0.00952,
+          "nuc_insertions_per_target_per_division": 0,
+          "nuc_deletions_per_target_per_division": 0
+        }
+      }
+    }
+  }
+}

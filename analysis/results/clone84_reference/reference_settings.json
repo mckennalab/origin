@@ -1,0 +1,10 @@
+{
+  "input": "/Users/aaronmck/Desktop/code/remote_mito_clean/data/clone84_binary_dataframe_minus12.csv",
+  "integrations": 10,
+  "barcodes": ["AACCACACCCACCACCTA", "AACTGATTTTGGAGGTTG", "ACTGCCACCGCACACCTC", "CGGGACGCCCACAGACGG", "GGATTTCTGCTTTCCCAG", "GTTGTGATATTGCGCCCA", "TCCGCGGCCGCTCGCCGG", "TCTCAAAGATCGCCTCGA", "TGCGACTACGCGCCCTTG", "TGGTCGCTGCGCATCAAG"],
+  "cells": 250,
+  "sites_per_barcode": 272,
+  "divisions": 30,
+  "seed": 1,
+  "fitted_mean_rate_per_target_per_division": 0.0192
+}

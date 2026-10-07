@@ -1,0 +1,10 @@
+"metric","real","simulated","ratio"
+"mean per-target editing rate",0.878804,0.867692775665399,0.987356424942762
+"spread of per-target rate (max - min)",0.019192,0.681125475285171,35.4900727013949
+"mean distinct calls per molecule (of 8)",2.02153304546362,2.99252319391635,1.48032365863702
+"molecules with no edited target",0.114484874396247,0,0
+"molecules where one event spans >= 4 targets",0.869271937917798,0.982886692015209,1.13070104893707
+"median distinct alleles per target",2980,6,0.00201342281879195
+"mean normalised entropy per target",0.366655,0.38535145294445,1.05099194868323
+"mean pairwise phi between targets",0.954625855101604,0.0020710549555986,0.0021694938855162
+"P(same allele | both edited)",0.693720024148707,0.654484158139435,0.943441352932806

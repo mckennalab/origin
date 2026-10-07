@@ -1,0 +1,736 @@
+---
+title: "Physical distance versus lineage distance in simulated Visium sections"
+author: "remote_mito_clean"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+    number_sections: true
+params:
+  input_path: "output/physicell_10000_20260726_171340/visium_spatial"
+  max_pairs_per_slice: 50000
+  seed: 1
+  recent_mrca_hours: 6
+---
+
+This parameterized notebook is a reporting stage only: it summarizes tables that
+`analyze_physicell_visium.R` has already written and never reruns PhysiCell or
+the lineage simulation. `params$input_path` is either one completed
+`visium_spatial/` analysis directory or a replicate-batch root (as produced by
+`run_physicell_visium_replicates.sh`) under which such directories are found;
+each analysis directory must contain `cell_distance_summary.csv`,
+`spot_distance_summary.csv` and `slice_summary.csv` (plain or gzipped), and the
+pair-level figures additionally use the `cell_pair_lineage_sample.csv[.gz]`
+table saved in each `slice_<NNN>/` subdirectory. `params$max_pairs_per_slice`
+caps how many saved pairs are loaded per slice for plotting, `params$seed` makes
+that subsampling reproducible, and `params$recent_mrca_hours` selects which
+`recent_mrca_le_<hours>h_fraction_enrichment` column the enrichment figure
+reads. `render_physicell_visium_notebook.R` supplies all four values from its
+`--input-path`, `--max-pairs-per-slice`, `--seed` and `--recent-mrca-hours`
+options and writes the knitted result to a self-contained HTML file (by default
+`<input-path>/physicell_visium_lineage_distance.html`); the notebook itself
+produces only figures and tables and writes no files of its own.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 9,
+  fig.height = 6,
+  dpi = 120
+)
+
+if(!requireNamespace("ggplot2", quietly = TRUE)){
+  stop("The ggplot2 package is required to render this notebook.")
+}
+library(ggplot2)
+
+theme_set(theme_bw(base_size = 12))
+set.seed(as.integer(params$seed))
+```
+
+This notebook visualizes the relationship between physical proximity and the
+known PhysiCell genealogy after conventional Visium-style sectioning. It can
+read either:
+
+1. one completed `visium_spatial/` analysis directory; or
+2. a replicate-batch directory created by
+   `run_physicell_visium_replicates.sh`.
+
+The dense point plots use at most `r format(params$max_pairs_per_slice, big.mark = ",")`
+saved pairs per slice for rendering speed. Binned curves use the complete
+`cell_distance_summary.csv.gz` tables produced during analysis. Cell pairs
+within one tumor are not independent biological replicates, so uncertainty is
+summarized across tumors whenever several replicate runs are supplied.
+
+# Load spatial-lineage output
+
+```{r input-helpers}
+#' Resolve a CSV path to whichever of its compressed/uncompressed forms exists
+#'
+#' Given either `foo.csv` or `foo.csv.gz`, checks both spellings and returns the
+#' one present on disk, preferring the gzipped file in both directions.
+#'
+#' @param path Character scalar path to a CSV, with or without a `.gz`
+#'   extension.
+#' @return The single existing path as a character scalar. Stops with the list
+#'   of candidates that were checked when neither form exists.
+resolve_notebook_csv <- function(path){
+  candidates <- if(grepl("\\.gz$", path, ignore.case = TRUE)){
+    c(path, sub("\\.gz$", "", path, ignore.case = TRUE))
+  } else{
+    c(paste0(path, ".gz"), path)
+  }
+  existing <- candidates[file.exists(candidates)]
+  if(length(existing) == 0L){
+    stop(sprintf("CSV file not found; checked: %s", paste(candidates, collapse = ", ")))
+  }
+  existing[1]
+}
+
+#' Read an analysis CSV that may be stored gzipped
+#'
+#' Resolves `path` with `resolve_notebook_csv()` and reads the result, opening a
+#' text connection first when the resolved file is gzipped. Column names are
+#' taken verbatim (`check.names = FALSE`) so the analysis headers survive.
+#'
+#' @param path Character scalar path to a CSV, with or without a `.gz`
+#'   extension.
+#' @return A data frame holding the file's rows and unmodified column names.
+read_notebook_csv <- function(path){
+  input <- resolve_notebook_csv(path)
+  if(grepl("\\.gz$", input, ignore.case = TRUE)){
+    connection <- gzfile(input, open = "rt")
+    on.exit(close(connection), add = TRUE)
+    return(utils::read.csv(connection, check.names = FALSE))
+  }
+  utils::read.csv(input, check.names = FALSE)
+}
+
+#' Locate the Visium spatial-lineage analysis directories under an input path
+#'
+#' Accepts either one completed analysis directory or a replicate-batch root.
+#' When `input_path` itself holds `cell_distance_summary.csv[.gz]` it is
+#' returned unchanged; otherwise the tree is searched recursively for that
+#' summary and only the directories literally named `visium_spatial` are kept,
+#' so unrelated per-slice subdirectories are ignored.
+#'
+#' @param input_path Character scalar directory path; must already exist, since
+#'   it is normalized with `mustWork = TRUE`.
+#' @return A character vector of normalized analysis-directory paths, sorted
+#'   when several replicates are found. Stops when no analysis is found.
+discover_visium_analyses <- function(input_path){
+  input_path <- normalizePath(input_path, mustWork = TRUE)
+  direct_summary <- c(
+    file.path(input_path, "cell_distance_summary.csv.gz"),
+    file.path(input_path, "cell_distance_summary.csv")
+  )
+  if(any(file.exists(direct_summary))){
+    return(input_path)
+  }
+  summaries <- list.files(
+    input_path,
+    pattern = "^cell_distance_summary\\.csv(\\.gz)?$",
+    recursive = TRUE,
+    full.names = TRUE
+  )
+  analysis_dirs <- unique(dirname(summaries))
+  analysis_dirs <- analysis_dirs[basename(analysis_dirs) == "visium_spatial"]
+  if(length(analysis_dirs) == 0L){
+    stop(paste(
+      "No visium_spatial analysis was found under",
+      input_path,
+      "Run analyze_physicell_visium.R first."
+    ))
+  }
+  sort(normalizePath(analysis_dirs, mustWork = TRUE))
+}
+
+#' Name the tumor replicate that owns an analysis directory
+#'
+#' @param analysis_dir Character path to a `visium_spatial` analysis directory.
+#' @return The basename of that directory's parent, used as the replicate label
+#'   in facets, colors, and summary tables.
+notebook_replicate_id <- function(analysis_dir){
+  basename(dirname(analysis_dir))
+}
+
+#' Read a saved cell-pair table, subsampling rows for plotting
+#'
+#' Rows are drawn without replacement only when the table is larger than
+#' `maximum`. The subsample is for rendering speed and affects only the
+#' pair-level point/density plots and the descriptive per-section correlations;
+#' the binned curves are computed from the complete analysis summaries.
+#'
+#' @param path Character path to a `cell_pair_lineage_sample.csv[.gz]` table.
+#' @param maximum Row cap; tables with at most this many rows are returned
+#'   intact.
+#' @param seed Integer seed set immediately before sampling, so each slice gets
+#'   a reproducible but distinct subsample.
+#' @return A data frame with at most `maximum` rows and all original columns.
+#' @section Side effects: Calls `set.seed(seed)` when subsampling, which changes
+#'   the session's random state.
+sample_notebook_pairs <- function(path, maximum, seed){
+  values <- read_notebook_csv(path)
+  if(nrow(values) > maximum){
+    set.seed(seed)
+    values <- values[sample.int(nrow(values), maximum), , drop = FALSE]
+  }
+  values
+}
+```
+
+```{r load-data}
+# Read the cell, spot, and slice summaries plus the per-slice pair samples from
+# every discovered analysis directory, tag each row with its replicate/slice,
+# bind them into the notebook-wide tables, and print an input overview.
+analysis_dirs <- discover_visium_analyses(params$input_path)
+
+pair_tables <- list()
+cell_summary_tables <- list()
+spot_summary_tables <- list()
+slice_summary_tables <- list()
+pair_table_index <- 0L
+
+for(analysis_index in seq_along(analysis_dirs)){
+  analysis_dir <- analysis_dirs[analysis_index]
+  replicate_id <- notebook_replicate_id(analysis_dir)
+
+  cell_summary <- read_notebook_csv(file.path(
+    analysis_dir,
+    "cell_distance_summary.csv"
+  ))
+  cell_summary$replicate <- replicate_id
+  cell_summary$analysis_dir <- analysis_dir
+  cell_summary_tables[[analysis_index]] <- cell_summary
+
+  spot_summary <- read_notebook_csv(file.path(
+    analysis_dir,
+    "spot_distance_summary.csv"
+  ))
+  spot_summary$replicate <- replicate_id
+  spot_summary$analysis_dir <- analysis_dir
+  spot_summary_tables[[analysis_index]] <- spot_summary
+
+  slice_summary <- read_notebook_csv(file.path(
+    analysis_dir,
+    "slice_summary.csv"
+  ))
+  slice_summary$replicate <- replicate_id
+  slice_summary$analysis_dir <- analysis_dir
+  slice_summary_tables[[analysis_index]] <- slice_summary
+
+  pair_paths <- list.files(
+    analysis_dir,
+    pattern = "^cell_pair_lineage_sample\\.csv(\\.gz)?$",
+    recursive = TRUE,
+    full.names = TRUE
+  )
+  for(local_index in seq_along(pair_paths)){
+    pair_table_index <- pair_table_index + 1L
+    pairs <- sample_notebook_pairs(
+      pair_paths[local_index],
+      maximum = as.integer(params$max_pairs_per_slice),
+      seed = as.integer(params$seed) + 1009L * pair_table_index
+    )
+    pairs$replicate <- replicate_id
+    pairs$slice_id <- basename(dirname(pair_paths[local_index]))
+    pairs$section <- paste(replicate_id, pairs$slice_id, sep = "/")
+    pair_tables[[pair_table_index]] <- pairs
+  }
+}
+
+cell_pairs <- if(length(pair_tables) > 0L){
+  do.call(rbind, pair_tables)
+} else{
+  data.frame()
+}
+cell_distance_summary <- do.call(rbind, cell_summary_tables)
+spot_distance_summary <- do.call(rbind, spot_summary_tables)
+slice_summary <- do.call(rbind, slice_summary_tables)
+rownames(cell_pairs) <- NULL
+rownames(cell_distance_summary) <- NULL
+rownames(spot_distance_summary) <- NULL
+rownames(slice_summary) <- NULL
+
+input_overview <- data.frame(
+  analysis_directories = length(analysis_dirs),
+  slices = nrow(slice_summary),
+  section_cells = sum(slice_summary$section_cells),
+  captured_cells = sum(slice_summary$captured_cells),
+  occupied_spots = sum(slice_summary$occupied_spots),
+  plotted_cell_pairs = nrow(cell_pairs),
+  evaluated_cell_pairs = sum(slice_summary$evaluated_cell_pairs),
+  stringsAsFactors = FALSE
+)
+knitr::kable(input_overview, digits = 3)
+```
+
+```{r slice-overview}
+knitr::kable(
+  slice_summary[, c(
+    "replicate", "slice_id", "slice_offset_microns", "section_cells",
+    "captured_cells", "occupied_spots", "mean_cells_per_occupied_spot",
+    "section_capture_fraction", "spearman_spatial_vs_mrca"
+  )],
+  digits = 3,
+  caption = "Sampling and spatial-lineage statistics for each virtual section."
+)
+```
+
+# Pair-level physical distance versus MRCA age
+
+MRCA age is the elapsed time from terminal sampling back to the most recent
+common ancestor. Smaller values indicate closer relatives. The color scale is
+logarithmic in the number of plotted cell pairs in each two-dimensional bin.
+
+```{r distance-mrca-density}
+if(nrow(cell_pairs) == 0L){
+  plot.new()
+  title("No captured cell pairs were available")
+} else{
+  ggplot(
+    cell_pairs,
+    aes(x = spatial_distance_2d_microns, y = mrca_age_hours)
+  ) +
+    stat_bin_2d(bins = 55, aes(fill = after_stat(log10(count)))) +
+    scale_fill_viridis_c(name = expression(log[10]("plotted pairs"))) +
+    labs(
+      x = "Projected cell-cell distance (microns)",
+      y = "Time back to MRCA (hours)",
+      title = "Nearby cells are enriched for recent common ancestry"
+    )
+}
+```
+
+```{r distance-mrca-by-section}
+if(nrow(cell_pairs) > 0L){
+  ggplot(
+    cell_pairs,
+    aes(x = spatial_distance_2d_microns, y = mrca_age_hours)
+  ) +
+    stat_bin_2d(bins = 35, aes(fill = after_stat(log10(count)))) +
+    scale_fill_viridis_c(name = expression(log[10]("pairs"))) +
+    facet_wrap(~section, scales = "free_x") +
+    labs(
+      x = "Projected distance (microns)",
+      y = "Time back to MRCA (hours)",
+      title = "Physical-lineage relationship by tumor and section"
+    ) +
+    theme(strip.text = element_text(size = 8))
+}
+```
+
+# Binned lineage correlogram and spatial null
+
+The solid curve is the observed mean MRCA age within each physical-distance
+bin. The dashed curve is obtained by permuting lineage tips over fixed spatial
+locations. A gap below the null indicates that cells at that spatial scale are
+more closely related than expected without spatial lineage structure.
+
+```{r prepare-summary-curves}
+# Stack the observed and permutation-null binned MRCA curves into one long
+# table keyed by replicate/slice/distance bin, dropping bins whose mean
+# distance or mean MRCA age is not finite.
+summary_long <- rbind(
+  data.frame(
+    cell_distance_summary[, c(
+      "replicate", "slice_id", "distance_bin",
+      "mean_spatial_distance_2d_microns"
+    )],
+    relationship = "observed",
+    mean_mrca_age_hours = cell_distance_summary$mean_mrca_age_hours
+  ),
+  data.frame(
+    cell_distance_summary[, c(
+      "replicate", "slice_id", "distance_bin",
+      "mean_spatial_distance_2d_microns"
+    )],
+    relationship = "permuted lineage locations",
+    mean_mrca_age_hours = cell_distance_summary$null_mean_mrca_age_hours
+  )
+)
+summary_long$section <- paste(
+  summary_long$replicate,
+  summary_long$slice_id,
+  sep = "/"
+)
+summary_long <- summary_long[
+  is.finite(summary_long$mean_spatial_distance_2d_microns) &
+    is.finite(summary_long$mean_mrca_age_hours),
+  ,
+  drop = FALSE
+]
+```
+
+```{r observed-null-curves}
+ggplot(
+  summary_long,
+  aes(
+    x = mean_spatial_distance_2d_microns,
+    y = mean_mrca_age_hours,
+    color = relationship,
+    linetype = relationship,
+    group = interaction(section, relationship)
+  )
+) +
+  geom_line(alpha = 0.45, linewidth = 0.7) +
+  geom_point(alpha = 0.55, size = 1.5) +
+  scale_color_manual(values = c(
+    "observed" = "#2166AC",
+    "permuted lineage locations" = "#B2182B"
+  )) +
+  labs(
+    x = "Mean projected distance in bin (microns)",
+    y = "Mean time back to MRCA (hours)",
+    color = NULL,
+    linetype = NULL,
+    title = "Observed spatial lineage structure versus permutation null"
+  ) +
+  theme(legend.position = "bottom")
+```
+
+The next curve uses the tumor as the independent unit: sections are averaged
+within each tumor first, and the ribbon is plus or minus one standard error
+across independently simulated tumors. With one tumor, the mean is shown
+without a ribbon.
+
+```{r replicate-level-curve}
+# Two-stage aggregation: average the sections within each tumor replicate, then
+# average across replicates, so the ribbon is a standard error over
+# independently simulated tumors rather than over non-independent cell pairs.
+replicate_keys <- unique(summary_long[, c(
+  "replicate", "distance_bin", "relationship"
+)])
+replicate_curve_rows <- vector("list", nrow(replicate_keys))
+for(row_index in seq_len(nrow(replicate_keys))){
+  selected <-
+    summary_long$replicate == replicate_keys$replicate[row_index] &
+    summary_long$distance_bin == replicate_keys$distance_bin[row_index] &
+    summary_long$relationship == replicate_keys$relationship[row_index]
+  replicate_curve_rows[[row_index]] <- data.frame(
+    replicate = replicate_keys$replicate[row_index],
+    distance_bin = replicate_keys$distance_bin[row_index],
+    relationship = replicate_keys$relationship[row_index],
+    mean_spatial_distance_2d_microns = mean(
+      summary_long$mean_spatial_distance_2d_microns[selected]
+    ),
+    mean_mrca_age_hours = mean(summary_long$mean_mrca_age_hours[selected]),
+    stringsAsFactors = FALSE
+  )
+}
+replicate_curves <- do.call(rbind, replicate_curve_rows)
+
+aggregate_keys <- unique(replicate_curves[, c("distance_bin", "relationship")])
+aggregate_curve_rows <- vector("list", nrow(aggregate_keys))
+for(row_index in seq_len(nrow(aggregate_keys))){
+  selected <-
+    replicate_curves$distance_bin == aggregate_keys$distance_bin[row_index] &
+    replicate_curves$relationship == aggregate_keys$relationship[row_index]
+  lineage_values <- replicate_curves$mean_mrca_age_hours[selected]
+  aggregate_curve_rows[[row_index]] <- data.frame(
+    distance_bin = aggregate_keys$distance_bin[row_index],
+    relationship = aggregate_keys$relationship[row_index],
+    mean_spatial_distance_2d_microns = mean(
+      replicate_curves$mean_spatial_distance_2d_microns[selected]
+    ),
+    mean_mrca_age_hours = mean(lineage_values),
+    standard_error = if(length(lineage_values) > 1L){
+      stats::sd(lineage_values) / sqrt(length(lineage_values))
+    } else{
+      NA_real_
+    },
+    tumors = length(lineage_values),
+    stringsAsFactors = FALSE
+  )
+}
+aggregate_curves <- do.call(rbind, aggregate_curve_rows)
+aggregate_curves <- aggregate_curves[
+  order(
+    aggregate_curves$relationship,
+    aggregate_curves$mean_spatial_distance_2d_microns
+  ),
+  ,
+  drop = FALSE
+]
+
+ggplot(
+  aggregate_curves,
+  aes(
+    x = mean_spatial_distance_2d_microns,
+    y = mean_mrca_age_hours,
+    color = relationship,
+    fill = relationship,
+    group = relationship
+  )
+) +
+  geom_ribbon(
+    aes(
+      ymin = mean_mrca_age_hours - standard_error,
+      ymax = mean_mrca_age_hours + standard_error
+    ),
+    alpha = 0.15,
+    color = NA,
+    na.rm = TRUE
+  ) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c(
+    "observed" = "#2166AC",
+    "permuted lineage locations" = "#B2182B"
+  )) +
+  scale_fill_manual(values = c(
+    "observed" = "#2166AC",
+    "permuted lineage locations" = "#B2182B"
+  )) +
+  labs(
+    x = "Mean projected distance in bin (microns)",
+    y = "Tumor-level mean time back to MRCA (hours)",
+    color = NULL,
+    fill = NULL,
+    title = "Tumor-replicate mean and standard error"
+  ) +
+  theme(legend.position = "bottom")
+```
+
+# Enrichment of recent relatives
+
+```{r recent-relative-enrichment}
+# Rebuild the analysis column name for the requested threshold
+# (recent_mrca_le_<hours>h_fraction_enrichment, with "." replaced by "_") and
+# plot it per section, or report that the analysis saved no such column.
+threshold_suffix <- gsub("\\.", "_", format(
+  as.numeric(params$recent_mrca_hours),
+  trim = TRUE
+))
+enrichment_column <- paste0(
+  "recent_mrca_le_",
+  threshold_suffix,
+  "h_fraction_enrichment"
+)
+if(enrichment_column %in% names(cell_distance_summary)){
+  enrichment_data <- cell_distance_summary[
+    is.finite(cell_distance_summary$mean_spatial_distance_2d_microns) &
+      is.finite(cell_distance_summary[[enrichment_column]]),
+    ,
+    drop = FALSE
+  ]
+  enrichment_data$enrichment <- enrichment_data[[enrichment_column]]
+  enrichment_data$section <- paste(
+    enrichment_data$replicate,
+    enrichment_data$slice_id,
+    sep = "/"
+  )
+  ggplot(
+    enrichment_data,
+    aes(
+      x = mean_spatial_distance_2d_microns,
+      y = enrichment,
+      group = section,
+      color = replicate
+    )
+  ) +
+    geom_hline(yintercept = 1, color = "grey50", linetype = 2) +
+    geom_line(alpha = 0.7) +
+    geom_point(size = 1.7) +
+    labs(
+      x = "Mean projected distance in bin (microns)",
+      y = sprintf(
+        "Enrichment of MRCA age <= %g hours",
+        as.numeric(params$recent_mrca_hours)
+      ),
+      color = "Tumor replicate",
+      title = "Short-range enrichment of recent relatives"
+    ) +
+    theme(legend.position = "bottom")
+} else{
+  plot.new()
+  title(sprintf(
+    "No %g-hour enrichment column was saved; rerun analysis with that threshold",
+    as.numeric(params$recent_mrca_hours)
+  ))
+}
+```
+
+# Physical distance versus lineage-edge distance
+
+Division distance is the number of event-tree edges separating two cells via
+their common ancestor. This is complementary to elapsed-time branch length
+when cell-cycle times vary.
+
+```{r distance-division-density}
+division_pairs <- cell_pairs[is.finite(cell_pairs$division_distance), , drop = FALSE]
+if(nrow(division_pairs) > 0L){
+  ggplot(
+    division_pairs,
+    aes(x = spatial_distance_2d_microns, y = division_distance)
+  ) +
+    stat_bin_2d(bins = 55, aes(fill = after_stat(log10(count)))) +
+    scale_fill_viridis_c(name = expression(log[10]("plotted pairs"))) +
+    labs(
+      x = "Projected cell-cell distance (microns)",
+      y = "Lineage-edge distance",
+      title = "Physical distance versus divisions separating cell pairs"
+    )
+}
+```
+
+# Within-spot and between-spot relationships
+
+Conventional Visium spots contain mixtures of cells. The first plot shows the
+cell-pair distribution within one spot versus between distinct spots. The
+second gives every sampled spot pair equal weight, rather than allowing spots
+with more cells to dominate.
+
+```{r same-spot-pairs}
+if(nrow(cell_pairs) > 0L){
+  same_spot_data <- transform(
+    cell_pairs,
+    spot_relationship = ifelse(same_spot, "within the same spot", "different spots")
+  )
+  ggplot(
+    same_spot_data,
+    aes(x = spot_relationship, y = mrca_age_hours, fill = spot_relationship)
+  ) +
+    geom_boxplot(outlier.shape = NA, width = 0.65) +
+    coord_cartesian(ylim = stats::quantile(
+      same_spot_data$mrca_age_hours,
+      c(0, 0.99),
+      na.rm = TRUE
+    )) +
+    scale_fill_manual(values = c(
+      "within the same spot" = "#4393C3",
+      "different spots" = "#D6604D"
+    )) +
+    labs(
+      x = NULL,
+      y = "Time back to MRCA (hours)",
+      fill = NULL,
+      title = "Lineage relatedness within and between Visium spots"
+    ) +
+    theme(legend.position = "none")
+}
+```
+
+```{r spot-distance-curve}
+# Keep spot-distance bins that actually sampled spot pairs, rank them by mean
+# spot-center distance within each replicate, and plot the equal-weight
+# spot-pair mean MRCA age against spot-center distance.
+spot_plot_data <- spot_distance_summary[
+  spot_distance_summary$spot_pairs > 0L &
+    is.finite(spot_distance_summary$mean_mrca_age_hours),
+  ,
+  drop = FALSE
+]
+spot_plot_data$spot_distance_order <- ave(
+  spot_plot_data$mean_spot_center_distance_microns,
+  spot_plot_data$replicate,
+  FUN = function(values) rank(values, ties.method = "first")
+)
+if(nrow(spot_plot_data) > 0L){
+  ggplot(
+    spot_plot_data,
+    aes(
+      x = mean_spot_center_distance_microns,
+      y = mean_mrca_age_hours,
+      group = interaction(replicate, slice_id),
+      color = replicate
+    )
+  ) +
+    geom_line(alpha = 0.7) +
+    geom_point(aes(size = spot_pairs), alpha = 0.8) +
+    scale_size_continuous(name = "Spot pairs", range = c(2, 6)) +
+    labs(
+      x = "Mean spot-center distance (microns)",
+      y = "Equal-spot-pair mean MRCA age (hours)",
+      color = "Tumor replicate",
+      title = "Visium-resolution spatial lineage relationship"
+    ) +
+    theme(legend.position = "bottom")
+}
+```
+
+# Section projection effects
+
+Cells are selected from a finite-thickness three-dimensional slab and then
+projected into two dimensions. The following plot reveals when cells that
+appear close in the section are farther apart in 3-D.
+
+```{r projection-effects}
+if(nrow(cell_pairs) > 0L){
+  ggplot(
+    cell_pairs,
+    aes(
+      x = spatial_distance_2d_microns,
+      y = spatial_distance_3d_microns - spatial_distance_2d_microns
+    )
+  ) +
+    stat_bin_2d(bins = 50, aes(fill = after_stat(log10(count)))) +
+    scale_fill_viridis_c(name = expression(log[10]("plotted pairs"))) +
+    labs(
+      x = "Projected 2-D distance (microns)",
+      y = "3-D minus projected distance (microns)",
+      title = "Distance distortion introduced by section projection"
+    )
+}
+```
+
+# Per-section statistics
+
+```{r section-statistics}
+# Descriptive per-section statistics over the plotted (possibly subsampled)
+# pairs: Spearman correlations of projected distance against MRCA age and
+# against lineage-edge distance, plus within-spot pair counts and mean MRCA age.
+section_groups <- split(cell_pairs, cell_pairs$section)
+section_statistics <- do.call(rbind, lapply(section_groups, function(values){
+  data.frame(
+    replicate = values$replicate[1],
+    slice_id = values$slice_id[1],
+    plotted_pairs = nrow(values),
+    spearman_distance_vs_mrca = suppressWarnings(stats::cor(
+      values$spatial_distance_2d_microns,
+      values$mrca_age_hours,
+      method = "spearman"
+    )),
+    spearman_distance_vs_divisions = suppressWarnings(stats::cor(
+      values$spatial_distance_2d_microns,
+      values$division_distance,
+      method = "spearman",
+      use = "complete.obs"
+    )),
+    within_spot_pairs = sum(values$same_spot),
+    within_spot_mean_mrca_hours = if(any(values$same_spot)){
+      mean(values$mrca_age_hours[values$same_spot])
+    } else{
+      NA_real_
+    },
+    stringsAsFactors = FALSE
+  )
+}))
+rownames(section_statistics) <- NULL
+knitr::kable(
+  section_statistics,
+  digits = 3,
+  caption = paste(
+    "Pair-level correlations are descriptive; tumor replicates, not pairs,",
+    "are the independent experimental units."
+  )
+)
+```
+
+# Interpretation
+
+The expected pattern is an increasing mean MRCA age and lineage-edge distance
+with increasing physical separation. A strong short-range effect does **not**
+imply that every nearby cell pair is closely related: mechanical rearrangement,
+growth-boundary interactions, cell loss, and section projection create overlap
+between genealogical distances at every spatial scale. The permutation curve
+quantifies how much of the observed relationship is lost when lineage labels
+are decoupled from cell locations.
+
+For replicated experiments, interpret the between-tumor spread of curves and
+statistics. Treating all within-tumor pairs as independent would severely
+underestimate uncertainty because each cell participates in many pairs and all
+cells share one simulated growth history.
