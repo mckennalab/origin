@@ -59,6 +59,11 @@ cat(sprintf("%d cells, %d informative characters, %.1f edits per cell\n",
 plot(tree, show.tip.label = FALSE, type = "fan", edge.color = "#1F3B4D")
 ```
 
+<p align="center">
+  <img src="docs/images/quickstart_lineage.png" width="420"
+       alt="Circular phylogram of the 221 simulated cells">
+</p>
+
 `ape` and `data.table` are used for reading and plotting here; the package
 itself does not require them.
 
@@ -101,6 +106,11 @@ image(x = seq_len(ncol(edits)), y = seq_len(nrow(edits)), z = t(edits),
       col = c("#F2F2F2", "#C05746"), axes = FALSE, xlab = "character", ylab = "")
 title("edits", adj = 0)
 ```
+
+<p align="center">
+  <img src="docs/images/edits_on_tree.png" width="760"
+       alt="The lineage beside its character matrix; edits form blocks that follow the clades">
+</p>
 
 The edits fall into blocks that follow the clades: an edit acquired in one cell
 is carried by all of its descendants. That block structure is the lineage
